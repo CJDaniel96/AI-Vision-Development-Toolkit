@@ -130,7 +130,9 @@
 
 ## 安裝與需求
 
-建議您建立一個 Python 虛擬環境，並透過 `pip` 安裝所需的套件。
+建議您建立一個 Python 虛擬環境。本專案所需的所有套件都已列在 `requirements.txt` 中。
+
+請執行以下指令來安裝所有相依套件：
 
 ```bash
 pip install -r requirements.txt
