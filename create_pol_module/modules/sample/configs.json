@@ -1,0 +1,54 @@
+{
+  "ai_defect": [
+    "Polarity"
+  ],
+  "pkg_type": {
+    "part_number": []
+  },
+  "model_path": "modules/sample/models/polarity/best.pt",
+  "embedding_size": 512,
+  "thresholds": {
+    "part_number": {
+      "1005-700700-00B": {
+        "U604": {
+          "side": 0.7,
+          "top": 0.7
+        }
+      },
+      "1005-700700-40B": {
+        "U604": {
+          "side": 0.7,
+          "top": 0.7
+        }
+      }
+    }
+  },
+  "mean": [
+    -1.468921184539795,
+    -1.330682396888733,
+    -1.1283318996429443
+  ],
+  "std": [
+    0.6209778785705566,
+    0.6500587463378906,
+    0.6967505216598511
+  ],
+  "golden_sample_base_path": "modules/sample/data/golden_sample",
+  "golden_sample_folders": {
+    "part_number": {
+      "1005-700700-00B": {
+        "U604": {
+          "side": "20250905073442_00VN558S115_T@U604_2_side.jpg",
+          "top": "20250905134746_00VN558S2B2_T@U604_1_top.jpg"
+        }
+      },
+      "1005-700700-40B": {
+        "U604": {
+          "side": "20250904015205_40VN558S17E_T@U604_3_side.jpg",
+          "top": "20250904000559_40VN558S01C_T@U604_3_top.jpg"
+        }
+      }
+    }
+  },
+  "device": "cuda"
+}
