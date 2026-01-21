@@ -4,7 +4,7 @@ import argparse
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-def filter_voc_dataset(input_dir: str, output_dir: str, target_labels: list[str] | None, exclude_labels: list[str] | None):
+def filter_voc_dataset(input_dir: str, output_dir: str, target_labels: list[str] | None, exclude_labels: list[str] | None, filter_no_labels: bool = False):
     """
     解析資料夾中的 PASCAL VOC XML 檔案，並將包含指定標記的
     影像和 XML 檔案複製到新的資料夾。此版本會遞迴搜尋子資料夾。
@@ -14,6 +14,7 @@ def filter_voc_dataset(input_dir: str, output_dir: str, target_labels: list[str]
         output_dir (str): 用於存放篩選後檔案的新資料夾路徑。
         target_labels (list[str] | None): 要篩選的物件標記名稱列表。
         exclude_labels (list[str] | None): 要排除的物件標記名稱列表。
+        filter_no_labels (bool): 是否篩選出沒有標記的資料。
     """
     # 步驟 1: 建立輸出資料夾 (如果不存在)
     output_path = Path(output_dir)
@@ -33,7 +34,12 @@ def filter_voc_dataset(input_dir: str, output_dir: str, target_labels: list[str]
     print_msg = f"在 '{input_dir}' 及其子資料夾中找到 {len(xml_files)} 個 XML 檔案，開始篩選...\n"
     if target_labels:
         print_msg += f"  - 目標標記: {', '.join(target_labels)}"
-    else:
+    
+    if filter_no_labels:
+        prefix = " + " if target_labels else "  - 目標標記: "
+        print_msg += f"{prefix}[無標記資料 (No Label)]"
+
+    if not target_labels and not filter_no_labels:
         print_msg += "  - 目標標記: [無] (篩選所有未被排除的資料)"
     if exclude_labels:
         print_msg += f"\n  - 排除標記: {', '.join(exclude_labels)}"
@@ -55,17 +61,29 @@ def filter_voc_dataset(input_dir: str, output_dir: str, target_labels: list[str]
                 print(f"  [排除] -> '{xml_path.name}' 包含排除標記: {', '.join(excluded_found)}，已跳過。")
                 continue
 
-            # 步驟 6: 包含條件檢查 (如果有的話)
-            if target_labels and set(target_labels).isdisjoint(labels_in_file):
+            # 步驟 6: 包含條件檢查
+            keep_file = False
+            reasons = []
+
+            if target_labels:
+                found_targets = set(target_labels).intersection(labels_in_file)
+                if found_targets:
+                    keep_file = True
+                    reasons.append(f"找到目標標記 '{list(found_targets)[0]}'")
+            
+            if filter_no_labels and not labels_in_file:
+                keep_file = True
+                reasons.append("未包含任何標記")
+
+            if not target_labels and not filter_no_labels:
+                keep_file = True
+                reasons.append("未包含任何排除標記")
+
+            if not keep_file:
                 continue
 
             # 檔案符合篩選條件，執行複製
-            reason = ""
-            if target_labels:
-                found_targets = set(target_labels).intersection(labels_in_file)
-                reason = f"找到目標標記 '{list(found_targets)[0]}'"
-            else:
-                reason = "未包含任何排除標記"
+            reason = " / ".join(reasons)
 
             # 複製 XML 檔案
             shutil.copy(xml_path, output_path)
@@ -134,11 +152,16 @@ def main():
         help="要排除的一個或多個標記 (class) 名稱，以空格分隔。\n"
              "如果影像包含這些標記中的任何一個，將不會被複製。\n例如: --exclude person"
     )
+    parser.add_argument(
+        "--no-label",
+        action="store_true",
+        help="篩選出沒有任何標記的資料 (Empty Labels)。"
+    )
 
     args = parser.parse_args()
 
-    if not args.label and not args.exclude:
-        parser.error("錯誤：您必須至少提供 --label 或 --exclude 其中一個參數。")
+    if not args.label and not args.exclude and not args.no_label:
+        parser.error("錯誤：您必須至少提供 --label, --exclude 或 --no-label 其中一個參數。")
 
     # 檢查輸入路徑是否存在
     input_path = Path(args.input_dir)
@@ -146,7 +169,7 @@ def main():
         print(f"錯誤：輸入路徑 '{input_path}' 不存在或不是一個有效的資料夾。")
         return
 
-    filter_voc_dataset(args.input_dir, args.output_dir, args.label, args.exclude)
+    filter_voc_dataset(args.input_dir, args.output_dir, args.label, args.exclude, args.no_label)
 
 
 if __name__ == "__main__":
