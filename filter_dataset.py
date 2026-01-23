@@ -4,7 +4,7 @@ import argparse
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-def filter_voc_dataset(input_dir: str, output_dir: str, target_labels: list[str] | None, exclude_labels: list[str] | None, filter_no_labels: bool = False):
+def filter_voc_dataset(input_dir: str, output_dir: str, target_labels: list[str] | None, exclude_labels: list[str] | None, filter_no_labels: bool = False, move_files: bool = False):
     """
     解析資料夾中的 PASCAL VOC XML 檔案，並將包含指定標記的
     影像和 XML 檔案複製到新的資料夾。此版本會遞迴搜尋子資料夾。
@@ -15,6 +15,7 @@ def filter_voc_dataset(input_dir: str, output_dir: str, target_labels: list[str]
         target_labels (list[str] | None): 要篩選的物件標記名稱列表。
         exclude_labels (list[str] | None): 要排除的物件標記名稱列表。
         filter_no_labels (bool): 是否篩選出沒有標記的資料。
+        move_files (bool): 是否移動檔案而非複製。
     """
     # 步驟 1: 建立輸出資料夾 (如果不存在)
     output_path = Path(output_dir)
@@ -22,6 +23,10 @@ def filter_voc_dataset(input_dir: str, output_dir: str, target_labels: list[str]
     print(f"輸出資料夾 '{output_path}' 已建立或已存在。")
 
     copied_files_count = 0
+    
+    # 定義操作模式
+    file_op = shutil.move if move_files else shutil.copy
+    op_name = "搬移" if move_files else "複製"
 
     # 使用 rglob 遞迴搜尋所有 .xml 檔案
     input_path = Path(input_dir)
@@ -82,11 +87,11 @@ def filter_voc_dataset(input_dir: str, output_dir: str, target_labels: list[str]
             if not keep_file:
                 continue
 
-            # 檔案符合篩選條件，執行複製
+            # 檔案符合篩選條件，執行操作
             reason = " / ".join(reasons)
 
-            # 複製 XML 檔案
-            shutil.copy(xml_path, output_path)
+            # 處理 XML 檔案
+            file_op(xml_path, output_path)
 
             # 尋找並複製對應的影像檔
             image_filename_base = xml_path.stem
@@ -99,8 +104,8 @@ def filter_voc_dataset(input_dir: str, output_dir: str, target_labels: list[str]
                     potential_image_paths.extend([image_dir / f"{image_filename_base}{ext}" for ext in image_extensions])
             for image_path in potential_image_paths:
                 if image_path.exists():
-                    shutil.copy(image_path, output_path)
-                    print(f"  [符合] -> {reason}。正在複製 '{xml_path.name}' 和 '{image_path.name}'...")
+                    file_op(image_path, output_path)
+                    print(f"  [符合] -> {reason}。正在{op_name} '{xml_path.name}' 和 '{image_path.name}'...")
                     copied_files_count += 1
                     image_found = True
                     break
@@ -113,7 +118,7 @@ def filter_voc_dataset(input_dir: str, output_dir: str, target_labels: list[str]
         except Exception as e:
             print(f"  [錯誤] -> 處理 '{xml_path.name}' 時發生未知錯誤: {e}")
 
-    print(f"\n處理完成！總共複製了 {copied_files_count} 組影像與 XML 檔案到 '{output_dir}'。")
+    print(f"\n處理完成！總共{op_name}了 {copied_files_count} 組影像與 XML 檔案到 '{output_dir}'。")
 
 
 def main():
@@ -122,7 +127,7 @@ def main():
     """
     parser = argparse.ArgumentParser(
         description="根據指定的標記名稱篩選 PASCAL VOC 資料集。\n"
-                    "程式會將包含該標記的影像及其對應的 XML 檔案複製到新目錄。",
+                    "程式會將包含該標記的影像及其對應的 XML 檔案複製(或搬移)到新目錄。",
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument(
@@ -157,6 +162,11 @@ def main():
         action="store_true",
         help="篩選出沒有任何標記的資料 (Empty Labels)。"
     )
+    parser.add_argument(
+        "--move",
+        action="store_true",
+        help="將檔案搬移到輸出目錄，而不是複製 (預設為複製)。"
+    )
 
     args = parser.parse_args()
 
@@ -169,7 +179,7 @@ def main():
         print(f"錯誤：輸入路徑 '{input_path}' 不存在或不是一個有效的資料夾。")
         return
 
-    filter_voc_dataset(args.input_dir, args.output_dir, args.label, args.exclude, args.no_label)
+    filter_voc_dataset(args.input_dir, args.output_dir, args.label, args.exclude, args.no_label, args.move)
 
 
 if __name__ == "__main__":
