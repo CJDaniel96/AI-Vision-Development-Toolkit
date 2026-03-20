@@ -42,65 +42,71 @@ def convert_bbox(size, box):
  
 def analyze_and_group_files(input_dir, predefined_classes=None):
     """
-    掃描資料夾，將檔案依照類別分組。
-    如果提供了 predefined_classes，只會統計在清單內的類別，
-    不在清單內的標籤會導致該圖片被視為 background (無標籤)。
+    掃描資料夾，將檔案依照「類別組合」分組 (Stratified Split by Label Combination)。
+    如果提供了 predefined_classes，只會統計在清單內的類別。
+    不在清單內的標籤會被忽略，若整張圖都沒有有效標籤，視為 background。
     """
-    files_by_class = {}
+    files_by_signature = {}
     detected_classes = set()
     no_label_files = []
-    # 如果有預定義類別，先初始化字典，確保順序正確
-    if predefined_classes:
-        for cls in predefined_classes:
-            files_by_class[cls] = []
+    
+    valid_classes_set = set(predefined_classes) if predefined_classes else None
+    
     input_path = Path(input_dir)
     image_files = [p for p in input_path.iterdir() if p.suffix.lower() in IMG_FORMATS]
     print(f"🔍 正在分析 {len(image_files)} 張影像...")
- 
+
     for img_path in tqdm(image_files, desc="Analyzing"):
         xml_path = img_path.with_suffix('.xml')
+        # 如果沒有對應 XML，視為無標籤 (或背景)
         if not xml_path.exists():
             no_label_files.append(img_path)
             continue
- 
+
         try:
             tree = ET.parse(xml_path)
             root = tree.getroot()
             objects = root.findall('object')
-            if not objects:
+            
+            # 收集該張圖片內所有出現的有效類別
+            current_img_classes = set()
+            if objects:
+                for obj in objects:
+                    name = obj.find('name').text
+                    if valid_classes_set is not None:
+                        if name in valid_classes_set:
+                            current_img_classes.add(name)
+                    else:
+                        current_img_classes.add(name)
+            
+            # 判斷結果
+            if not current_img_classes:
+                # 存在的 XML 但沒有有效物件 (或物件都被過濾了)
                 no_label_files.append(img_path)
-                continue
-            # 取得第一個物件的名稱
-            cls_name = objects[0].find('name').text
-            # 邏輯判斷
-            if predefined_classes is not None:
-                # 【模式 A：自訂類別】
-                if cls_name in files_by_class:
-                    files_by_class[cls_name].append(img_path)
-                    detected_classes.add(cls_name)
-                else:
-                    # 標籤存在但不在我們的清單內 -> 視為背景圖
-                    no_label_files.append(img_path)
             else:
-                # 【模式 B：自動偵測】
-                if cls_name not in files_by_class:
-                    files_by_class[cls_name] = []
-                files_by_class[cls_name].append(img_path)
-                detected_classes.add(cls_name)
+                detected_classes.update(current_img_classes)
+                # 建立簽名 (排序後的 tuple，例如 ('dog', 'person'))
+                signature = tuple(sorted(list(current_img_classes)))
+                
+                if signature not in files_by_signature:
+                    files_by_signature[signature] = []
+                files_by_signature[signature].append(img_path)
+
         except Exception as e:
             print(f"⚠️ XML 解析錯誤: {xml_path.name} -> {e}")
- 
-    # 將無標籤 (或標籤被過濾掉) 的檔案加入 background
+            # 解析失敗則跳過，不加入任何列表
+
+    # 處理背景圖
     if no_label_files:
-        files_by_class['__background__'] = no_label_files
- 
+        files_by_signature[('__background__',)] = no_label_files
+
     # 決定最終回傳的類別列表
     if predefined_classes:
-        final_classes = predefined_classes # 保持使用者定義的順序
+        final_classes = predefined_classes 
     else:
-        final_classes = sorted(list(detected_classes)) # 自動排序
- 
-    return files_by_class, final_classes
+        final_classes = sorted(list(detected_classes))
+
+    return files_by_signature, final_classes
  
 def process_dataset(files, split_name, class_mapping, output_dir):
     """處理單一分割的檔案複製與轉換"""
@@ -153,34 +159,51 @@ def main():
     if sum(args.split) != 1.0:
         total = sum(args.split)
         args.split = [x/total for x in args.split]
-    files_by_class, classes = analyze_and_group_files(input_dir, target_classes)
+    files_by_signature, classes = analyze_and_group_files(input_dir, target_classes)
     # 建立 ID 對應表 (依照 classes 列表的順序)
     class_mapping = {name: i for i, name in enumerate(classes)}
-    print("\n📊 資料統計:")
+
+    print("\n📊 資料統計 (基於影像內類別組合分組):")
     total_images = 0
-    for cls in classes:
-        # 注意：如果是自訂類別，有些類別可能沒有圖片，要防止 Key Error
-        count = len(files_by_class.get(cls, []))
+    # 統計各單一類別出現的影像數
+    class_counts = {c: 0 for c in classes}
+    bg_count = 0
+    
+    # files_by_signature key 為 tuple, value 為 list
+    for signature, files in files_by_signature.items():
+        count = len(files)
         total_images += count
-        print(f"  - [ID: {class_mapping[cls]}] {cls}: {count} 張")
-    bg_count = len(files_by_class.get('__background__', []))
+        if signature == ('__background__',):
+            bg_count = count
+            continue
+        
+        # 統計這組 signature 中的類別
+        for c in signature:
+            if c in class_counts:
+                class_counts[c] += count
+
+    for cls in classes:
+        print(f"  - [ID: {class_mapping[cls]}] {cls}: {class_counts[cls]} 張 (含此類別)")
+    
     if bg_count > 0:
         print(f"  - [Background]: {bg_count} 張 (無標記或不在清單內)")
-        total_images += bg_count
+        
     print(f"  - 總計處理: {total_images} 張")
     print("-" * 30)
  
     # 3. 分層抽樣
     split_groups = {'train': [], 'val': [], 'test': []}
-    # 包含背景圖的所有類別 (包括 __background__)
-    all_keys = list(files_by_class.keys())
-    for cls in all_keys:
-        files = files_by_class[cls]
+    # 這裡的 key 改為 signature (tuple)
+    all_signatures = list(files_by_signature.keys())
+    
+    for sig in all_signatures:
+        files = files_by_signature[sig]
         if not files: continue
         random.shuffle(files)
         n_total = len(files)
         n_train = int(n_total * args.split[0])
         n_val = int(n_total * args.split[1])
+        # 剩餘的給 test，確保總數正確
         split_groups['train'].extend(files[:n_train])
         split_groups['val'].extend(files[n_train : n_train + n_val])
         split_groups['test'].extend(files[n_train + n_val:])

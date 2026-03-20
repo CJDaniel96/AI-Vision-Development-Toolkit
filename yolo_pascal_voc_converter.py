@@ -199,7 +199,7 @@ def get_video_files(input_folder: str) -> List[str]:
     
     return video_files
 
-def process_video(video_path: str, model, output_folder: str, confidence_threshold: float, frame_interval: int, save_frames: bool, verbose: bool) -> Tuple[int, int]:
+def process_video(video_path: str, model, output_folder: str, confidence_threshold: float, frame_interval: int, save_frames: bool, save_video: bool, verbose: bool) -> Tuple[int, int]:
     """
     處理單一影片檔案
     
@@ -210,6 +210,7 @@ def process_video(video_path: str, model, output_folder: str, confidence_thresho
         confidence_threshold (float): 信心度閾值
         frame_interval (int): 幀間隔
         save_frames (bool): 是否儲存偵測到的幀
+        save_video (bool): 是否儲存偵測結果影片
         verbose (bool): 是否顯示詳細資訊
         
     Returns:
@@ -221,7 +222,24 @@ def process_video(video_path: str, model, output_folder: str, confidence_thresho
         return 0, 1
     
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     cap.release() # 僅獲取資訊後立即釋放
+
+    video_writer = None
+    if save_video:
+        video_base_name = Path(video_path).stem
+        video_output_filename = f"{video_base_name}_detected.mp4"
+        video_output_path = os.path.join(output_folder, video_output_filename)
+        try:
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            # 如果有 frame_interval，影片會變快，因為我們只寫入部分幀但使用原始 FPS
+            # 這是預期行為，僅記錄偵測到的幀
+            video_writer = cv2.VideoWriter(video_output_path, fourcc, fps, (width, height))
+            print(f"將儲存偵測結果影片至: {video_output_path}")
+        except Exception as e:
+            print(f"警告: 無法建立影片寫入器: {e}")
 
     frame_idx = 0
     success_count = 0
@@ -232,7 +250,7 @@ def process_video(video_path: str, model, output_folder: str, confidence_thresho
 
     try:
         # 使用 stream=True 進行記憶體效率高的推論
-        results_generator = model.predict(video_path, stream=True, verbose=False)
+        results_generator = model.predict(video_path, stream=True, verbose=False, conf=confidence_threshold)
 
         for result in results_generator:
             frame_idx += 1
@@ -254,14 +272,28 @@ def process_video(video_path: str, model, output_folder: str, confidence_thresho
                 # 生成輸出檔案名稱
                 frame_filename = f"{video_base_name}_frame_{frame_idx:06d}.jpg"
                 xml_filename = f"{video_base_name}_frame_{frame_idx:06d}.xml"
-                frame_output_path = os.path.join(output_folder, frame_filename)
-                xml_output_path = os.path.join(output_folder, xml_filename)
+                
+                # 定義子資料夾路徑
+                annotations_dir = os.path.join(output_folder, "Annotations")
+                jpeg_images_dir = os.path.join(output_folder, "JPEGImages")
+                
+                # 確保子資料夾存在
+                os.makedirs(annotations_dir, exist_ok=True)
+                os.makedirs(jpeg_images_dir, exist_ok=True)
+
+                frame_output_path = os.path.join(jpeg_images_dir, frame_filename)
+                xml_output_path = os.path.join(annotations_dir, xml_filename)
 
                 # 儲存偵測到的幀
                 if save_frames:
                     # result.orig_img 是 BGR 格式的 numpy 陣列，可以直接用 cv2 儲存
                     cv2.imwrite(frame_output_path, result.orig_img)
                 
+                # 儲存偵測結果影片
+                if video_writer:
+                    annotated_frame = result.plot()
+                    video_writer.write(annotated_frame)
+
                 # 創建PASCAL VOC XML
                 if create_pascal_voc_xml(frame_output_path, detections, xml_output_path, width, height, depth):
                     if verbose:
@@ -278,7 +310,11 @@ def process_video(video_path: str, model, output_folder: str, confidence_thresho
                 error_count += 1
     except Exception as e:
         print(f"錯誤：處理影片 {video_path} 時發生嚴重錯誤: {e}")
-        return success_count, error_count + 1
+        error_count += 1
+    finally:
+        if video_writer:
+            video_writer.release()
+            print("影片寫入完成並已釋放。")
 
     return success_count, error_count
 
@@ -369,6 +405,10 @@ def parse_arguments():
                        dest='copy_images',
                        help='不複製原始影像到輸出資料夾')
     
+    parser.add_argument('--save-video',
+                       action='store_true',
+                       help='儲存包含偵測框的影片')
+    
     parser.add_argument('-v', '--verbose',
                        action='store_true',
                        help='顯示詳細資訊')
@@ -395,6 +435,7 @@ def main():
         print(f"使用設備: {'GPU' if args.gpu else 'CPU'}")
         print(f"影片幀間隔: {args.frame_interval}")
         print(f"複製影像/幀: {'是' if args.copy_images else '否'}")
+        print(f"儲存偵測影片: {'是' if args.save_video else '否'}")
         print("-" * 60)
     
     # 驗證信心度範圍
@@ -450,7 +491,7 @@ def main():
                         depth = len(img.getbands()) if hasattr(img, 'getbands') else 3
 
                     # 執行物件偵測
-                    results = model.predict(image_path, verbose=False)
+                    results = model.predict(image_path, verbose=False, conf=args.confidence)
                     
                     # 處理偵測結果
                     detections = process_yolo_results(results, args.confidence)
@@ -458,13 +499,23 @@ def main():
                     # 生成輸出檔案名稱
                     base_name = os.path.splitext(os.path.basename(image_path))[0]
                     xml_filename = f"{base_name}.xml"
-                    xml_output_path = os.path.join(args.output, xml_filename)
+                    
+                    # 定義子資料夾路徑
+                    annotations_dir = os.path.join(args.output, "Annotations")
+                    jpeg_images_dir = os.path.join(args.output, "JPEGImages")
+                    
+                    # 確保子資料夾存在
+                    os.makedirs(annotations_dir, exist_ok=True)
+                    os.makedirs(jpeg_images_dir, exist_ok=True)
+
+                    xml_output_path = os.path.join(annotations_dir, xml_filename)
                     
                     # 創建PASCAL VOC XML
+                    # 注意：這裡保留 original image_path 作為 XML 中的 path 內容 (根據 "保存影像的路徑不變" 的需求)
                     if create_pascal_voc_xml(image_path, detections, xml_output_path, width, height, depth):
                         # 複製原始影像到輸出資料夾（如果需要）
                         if args.copy_images:
-                            image_output_path = os.path.join(args.output, os.path.basename(image_path))
+                            image_output_path = os.path.join(jpeg_images_dir, os.path.basename(image_path))
                             shutil.copy2(image_path, image_output_path)
                         
                         if args.verbose:
@@ -492,7 +543,7 @@ def main():
                 if args.verbose:
                     print(f"處理中 ({i}/{len(video_files)}): {os.path.basename(video_path)}")
                 
-                s_count, e_count = process_video(video_path, model, args.output, args.confidence, args.frame_interval, args.copy_images, args.verbose)
+                s_count, e_count = process_video(video_path, model, args.output, args.confidence, args.frame_interval, args.copy_images, args.save_video, args.verbose)
                 success_count += s_count
                 error_count += e_count
 
@@ -508,7 +559,7 @@ def main():
             print("\n開始處理影片...")
             print("-" * 60)
         
-        s_count, e_count = process_video(args.input, model, args.output, args.confidence, args.frame_interval, args.copy_images, args.verbose)
+        s_count, e_count = process_video(args.input, model, args.output, args.confidence, args.frame_interval, args.copy_images, args.save_video, args.verbose)
         success_count += s_count
         error_count += e_count
     
