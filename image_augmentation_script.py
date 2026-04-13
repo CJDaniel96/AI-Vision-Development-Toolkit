@@ -177,10 +177,131 @@ class ImageAugmentator:
             A.HueSaturationValue(hue_shift_limit=15, sat_shift_limit=20, val_shift_limit=15, p=0.5)
         ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['class_labels']))
         
+        pipelines['smart_camera'] = A.Compose(
+            [
+                # 1) 尺寸統一
+                A.LongestMaxSize(max_size=960, p=1.0),
+                A.PadIfNeeded(
+                    min_height=960,
+                    min_width=960,
+                    border_mode=cv2.BORDER_CONSTANT,
+                    fill=0,
+                    p=1.0
+                ),
+        
+                # 2) 輕量幾何變換：模擬相機安裝誤差 / 人員站位偏差
+                A.Affine(
+                    scale=(0.95, 1.05),
+                    translate_percent={"x": (-0.03, 0.03), "y": (-0.03, 0.03)},
+                    rotate=(-5, 5),
+                    shear=(-3, 3),
+                    border_mode=cv2.BORDER_CONSTANT,
+                    fill=0,
+                    p=0.6
+                ),
+        
+                # 3) 光照變化：模擬工位亮度波動
+                A.OneOf([
+                    A.RandomBrightnessContrast(
+                        brightness_limit=0.15,
+                        contrast_limit=0.15,
+                        p=1.0
+                    ),
+                    A.RandomGamma(
+                        gamma_limit=(85, 115),
+                        p=1.0
+                    ),
+                ], p=0.5),
+        
+                # 4) 輕量畫質退化：模擬動作模糊 / 對焦波動 / 串流壓縮
+                A.OneOf([
+                    A.MotionBlur(blur_limit=(3, 5), p=1.0),
+                    A.GaussianBlur(blur_limit=(3, 5), p=1.0),
+                    A.ImageCompression(quality_range=(70, 95), p=1.0),
+                ], p=0.25),
+        
+                # 5) 少量遮擋：模擬手部互擋 / 說明書局部被遮
+                A.CoarseDropout(
+                    num_holes_range=(1, 3),
+                    hole_height_range=(0.03, 0.08),
+                    hole_width_range=(0.03, 0.08),
+                    fill=0,
+                    p=0.15
+                ),
+            ],
+            bbox_params=A.BboxParams(
+                format="yolo",              # 或 "pascal_voc"
+                label_fields=["class_labels"],
+                min_visibility=0.3,
+                min_area=16,
+                clip=True
+            )
+        )
+        
+        pipelines['hz_pde'] = A.Compose(
+            [
+                # 1) 幾何：保守
+                A.OneOf([
+                    A.Affine(
+                        scale=(0.95, 1.05),
+                        translate_percent={"x": (-0.03, 0.03), "y": (-0.03, 0.03)},
+                        rotate=(-5, 5),
+                        shear=(-3, 3),
+                        interpolation=cv2.INTER_LINEAR,
+                        border_mode=cv2.BORDER_CONSTANT,
+                        p=1.0,
+                    ),
+                ], p=0.6),
+        
+                # 2) 水平翻轉：只有左右對稱合理時才開
+                A.HorizontalFlip(p=0.5),
+        
+                # 3) 光照 / 顏色：中低強度
+                A.OneOf([
+                    A.RandomBrightnessContrast(
+                        brightness_limit=0.15,
+                        contrast_limit=0.15,
+                        p=1.0
+                    ),
+                    A.ColorJitter(
+                        brightness=0.12,
+                        contrast=0.12,
+                        saturation=0.08,
+                        hue=0.03,
+                        p=1.0
+                    ),
+                ], p=0.5),
+        
+                # 4) 畫質退化 / 模糊：模擬影片
+                A.OneOf([
+                    A.MotionBlur(blur_limit=5, p=1.0),
+                    A.GaussianBlur(blur_limit=(3, 5), p=1.0),
+                    A.ImageCompression(quality_range=(70, 95), p=1.0),
+                    A.GaussNoise(std_range=(0.01, 0.03), p=1.0),
+                ], p=0.35),
+        
+                # 5) 少量遮擋：不要太重
+                A.CoarseDropout(
+                    num_holes_range=(1, 3),
+                    hole_height_range=(0.03, 0.08),
+                    hole_width_range=(0.03, 0.08),
+                    fill=0,
+                    p=0.15,
+                ),
+            ],
+            bbox_params=A.BboxParams(
+                format="pascal_voc",
+                label_fields=["class_labels"],
+                min_area=16,
+                min_visibility=0.3,
+            )
+        )
+        
         return pipelines
     
     def augment_image_with_annotations(self, image_path: str, xml_path: str, 
-                                     output_dir: str, augmentation_types: List[str]) -> None:
+                                     output_dir: str, augmentation_types: List[str],
+                                     num_augmentations: int = 1) -> None:
         """
         對單一影像及其標註進行擴增
         
@@ -220,53 +341,56 @@ class ImageAugmentator:
                 print(f"警告：不支援的擴增類型 '{aug_type}'，跳過")
                 continue
             
-            try:
-                # 執行擴增
-                augmented = self.augmentation_pipelines[aug_type](
-                    image=image, 
-                    bboxes=bboxes, 
-                    class_labels=class_labels
-                )
-                
-                augmented_image = augmented['image']
-                augmented_bboxes = augmented['bboxes']
-                augmented_labels = augmented['class_labels']
-                
-                # 如果邊界框為空（可能被裁切掉了），跳過這次擴增
-                if len(augmented_bboxes) == 0:
-                    print(f"警告：擴增後物件全部被裁切，跳過 {base_name}_{aug_type}")
+            for i in range(num_augmentations):
+                try:
+                    # 執行擴增
+                    augmented = self.augmentation_pipelines[aug_type](
+                        image=image, 
+                        bboxes=bboxes, 
+                        class_labels=class_labels
+                    )
+                    
+                    augmented_image = augmented['image']
+                    augmented_bboxes = augmented['bboxes']
+                    augmented_labels = augmented['class_labels']
+                    
+                    suffix = f"{aug_type}_{i+1}" if num_augmentations > 1 else aug_type
+                    
+                    # 如果邊界框為空（可能被裁切掉了），跳過這次擴增
+                    if len(augmented_bboxes) == 0:
+                        print(f"警告：擴增後物件全部被裁切，跳過 {base_name}_{suffix}")
+                        continue
+                    
+                    # 更新標註資料
+                    updated_annotation = annotation_data.copy()
+                    updated_annotation['filename'] = f"{base_name}_{suffix}{image_ext}"
+                    updated_annotation['height'], updated_annotation['width'] = augmented_image.shape[:2]
+                    
+                    # 更新物件標註
+                    updated_objects = []
+                    for bbox, label in zip(augmented_bboxes, augmented_labels):
+                        updated_objects.append({
+                            'name': label,
+                            'bbox': bbox
+                        })
+                    updated_annotation['objects'] = updated_objects
+                    
+                    # 儲存擴增後的影像
+                    output_image_path = os.path.join(output_dir, f"{base_name}_{suffix}{image_ext}")
+                    cv2.imwrite(output_image_path, augmented_image)
+                    
+                    # 儲存更新後的 XML
+                    output_xml_path = os.path.join(output_dir, f"{base_name}_{suffix}.xml")
+                    self.voc_processor.create_xml(updated_annotation, output_xml_path)
+                    
+                    print(f"✓ 完成擴增：{base_name}_{suffix}")
+                    
+                except Exception as e:
+                    print(f"錯誤：處理 {base_name} 的 {aug_type} (第{i+1}次) 擴增時發生錯誤：{e}")
                     continue
-                
-                # 更新標註資料
-                updated_annotation = annotation_data.copy()
-                updated_annotation['filename'] = f"{base_name}_{aug_type}{image_ext}"
-                updated_annotation['height'], updated_annotation['width'] = augmented_image.shape[:2]
-                
-                # 更新物件標註
-                updated_objects = []
-                for bbox, label in zip(augmented_bboxes, augmented_labels):
-                    updated_objects.append({
-                        'name': label,
-                        'bbox': bbox
-                    })
-                updated_annotation['objects'] = updated_objects
-                
-                # 儲存擴增後的影像
-                output_image_path = os.path.join(output_dir, f"{base_name}_{aug_type}{image_ext}")
-                cv2.imwrite(output_image_path, augmented_image)
-                
-                # 儲存更新後的 XML
-                output_xml_path = os.path.join(output_dir, f"{base_name}_{aug_type}.xml")
-                self.voc_processor.create_xml(updated_annotation, output_xml_path)
-                
-                print(f"✓ 完成擴增：{base_name}_{aug_type}")
-                
-            except Exception as e:
-                print(f"錯誤：處理 {base_name} 的 {aug_type} 擴增時發生錯誤：{e}")
-                continue
     
     def batch_augment(self, input_dir: str, output_dir: str, 
-                     augmentation_types: List[str]) -> None:
+                     augmentation_types: List[str], num_augmentations: int = 1) -> None:
         """
         批次處理資料夾中的所有影像和標註
         
@@ -305,7 +429,8 @@ class ImageAugmentator:
                 str(image_file), 
                 str(xml_file), 
                 output_dir, 
-                augmentation_types
+                augmentation_types,
+                num_augmentations
             )
             
             processed_count += 1
@@ -321,13 +446,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
             可用的擴增類型：
-            horizontal_flip    - 水平翻轉
+            horizontal_flip     - 水平翻轉
             brightness_contrast - 亮度對比度調整
-            hue_saturation    - 色調飽和度調整
-            mixed             - 混合擴增（同時應用多種技術）
+            hue_saturation      - 色調飽和度調整
+            mixed               - 混合擴增（同時應用多種技術）
+            smart_camera        - smart camera
+            hz_pde              - HZ PDE
+            
 
             使用範例：
             python augment_images.py -i ./dataset -o ./augmented_dataset -a horizontal_flip rotation
+            python augment_images.py -i ./dataset -o ./augmented_dataset -a mixed -n 5
             python augment_images.py -i ./data -o ./output -a mixed
         """
     )
@@ -339,9 +468,12 @@ def main():
                        help='輸出資料夾路徑')
     
     parser.add_argument('-a', '--augmentations', nargs='+', 
-                       choices=['horizontal_flip', 'brightness_contrast', 'hue_saturation', 'mixed'],
+                       choices=['horizontal_flip', 'brightness_contrast', 'hue_saturation', 'mixed', 'smart_camera', 'hz_pde'],
                        default=['horizontal_flip'],
                        help='要執行的擴增類型（可指定多個）')
+    
+    parser.add_argument('-n', '--num_augmentations', type=int, default=1,
+                       help='每種擴增類型要產生的影像數量倍數 (預設: 1)')
     
     parser.add_argument('--seed', type=int, default=42,
                        help='隨機種子（確保結果可重現）')
@@ -363,12 +495,13 @@ def main():
     print(f"輸入資料夾：{args.input_dir}")
     print(f"輸出資料夾：{args.output_dir}")
     print(f"擴增類型：{', '.join(args.augmentations)}")
+    print(f"擴增倍數：{args.num_augmentations}")
     print(f"隨機種子：{args.seed}")
     print("=" * 60)
     
     # 建立擴增器並執行批次處理
     augmentator = ImageAugmentator()
-    augmentator.batch_augment(args.input_dir, args.output_dir, args.augmentations)
+    augmentator.batch_augment(args.input_dir, args.output_dir, args.augmentations, args.num_augmentations)
     
     print("=" * 60)
     print("處理完成！")
