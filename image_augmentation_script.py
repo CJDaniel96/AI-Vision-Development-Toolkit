@@ -1,11 +1,27 @@
 #!/usr/bin/env python3
 """
 影像擴增腳本 (Image Augmentation Script)
-功能：對影像進行多種擴增處理，並同步更新 PASCAL VOC 格式的邊界框座標
+功能：
+  - 支援 PASCAL VOC (.xml)、YOLO (.txt)、CVAT (.xml) 格式的標註同步擴增
+  - 支援純影像擴增（無標註，--image_only）
+  - 多種擴增管道：horizontal_flip, brightness_contrast, hue_saturation,
+                   mixed, smart_camera, hz_pde, rotation, image_only
 
-作者：AI Assistant
-版本：1.0
-日期：2025年7月
+使用範例：
+  # VOC 格式（影像與 XML 同一資料夾）
+  python image_augmentation_script.py -i ./dataset -o ./augmented -a mixed -n 3
+
+  # YOLO/多格式（影像與標籤分開）
+  python image_augmentation_script.py -i ./images -l ./labels -o ./augmented -a mixed -n 5
+
+  # 旋轉擴增（隨機角度）
+  python image_augmentation_script.py -i ./images -l ./labels -o ./augmented -a rotation --rotate_limit 40 -n 5
+
+  # 旋轉擴增（固定步長，每隔 45° 產生一個版本）
+  python image_augmentation_script.py -i ./images -l ./labels -o ./augmented -a rotation --rotate_step 45
+
+  # 純影像擴增（無標註）
+  python image_augmentation_script.py -i ./images -o ./augmented --image_only -n 3
 """
 
 import os
@@ -13,499 +29,559 @@ import argparse
 import random
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import List, Tuple, Dict, Any
+from typing import List, Dict, Any, Optional, Callable, Tuple
 import cv2
 import numpy as np
 import albumentations as A
-from albumentations.core.composition import Compose
+from tqdm import tqdm
 
 
-class PascalVOCProcessor:
-    """處理 PASCAL VOC 格式 XML 檔案的類別"""
-    
-    def __init__(self):
-        pass
-    
-    def parse_xml(self, xml_path: str) -> Dict[str, Any]:
-        """
-        解析 PASCAL VOC XML 檔案
-        
-        Args:
-            xml_path (str): XML 檔案路徑
-            
-        Returns:
-            Dict: 包含影像資訊和物件標註的字典
-        """
-        tree = ET.parse(xml_path)
-        root = tree.getroot()
-        
-        # 提取影像基本資訊
-        filename = root.find('filename').text
-        size = root.find('size')
-        width = int(size.find('width').text)
-        height = int(size.find('height').text)
-        depth = size.find('depth').text
-        
-        # 提取所有物件標註
-        objects = []
-        for obj in root.findall('object'):
-            name = obj.find('name').text
-            bbox = obj.find('bndbox')
-            
-            # 提取邊界框座標
-            xmin = float(bbox.find('xmin').text)
-            ymin = float(bbox.find('ymin').text)
-            xmax = float(bbox.find('xmax').text)
-            ymax = float(bbox.find('ymax').text)
-            
-            objects.append({
-                'name': name,
-                'bbox': [xmin, ymin, xmax, ymax]
-            })
-        
-        return {
-            'filename': filename,
-            'width': width,
-            'height': height,
-            'depth': depth,
-            'objects': objects
-        }
-    
-    def create_xml(self, annotation_data: Dict[str, Any], output_path: str) -> None:
-        """
-        建立新的 PASCAL VOC XML 檔案
-        
-        Args:
-            annotation_data (Dict): 標註資料
-            output_path (str): 輸出檔案路徑
-        """
-        # 建立根元素
-        annotation = ET.Element('annotation')
-        
-        # 添加基本資訊
-        folder = ET.SubElement(annotation, 'folder')
-        folder.text = 'augmented'
-        
-        filename = ET.SubElement(annotation, 'filename')
-        filename.text = annotation_data['filename']
-        
-        # 添加影像尺寸資訊
-        size = ET.SubElement(annotation, 'size')
-        width = ET.SubElement(size, 'width')
-        width.text = str(annotation_data['width'])
-        height = ET.SubElement(size, 'height')
-        height.text = str(annotation_data['height'])
-        depth = ET.SubElement(size, 'depth')
-        depth.text = str(annotation_data['depth'])
-        
-        # 添加物件標註
-        for obj in annotation_data['objects']:
-            object_elem = ET.SubElement(annotation, 'object')
-            
-            name = ET.SubElement(object_elem, 'name')
-            name.text = obj['name']
-            
-            pose = ET.SubElement(object_elem, 'pose')
-            pose.text = 'Unspecified'
-            
-            truncated = ET.SubElement(object_elem, 'truncated')
-            truncated.text = '0'
-            
-            difficult = ET.SubElement(object_elem, 'difficult')
-            difficult.text = '0'
-            
-            # 添加邊界框
-            bndbox = ET.SubElement(object_elem, 'bndbox')
-            xmin = ET.SubElement(bndbox, 'xmin')
-            xmin.text = str(int(obj['bbox'][0]))
-            ymin = ET.SubElement(bndbox, 'ymin')
-            ymin.text = str(int(obj['bbox'][1]))
-            xmax = ET.SubElement(bndbox, 'xmax')
-            xmax.text = str(int(obj['bbox'][2]))
-            ymax = ET.SubElement(bndbox, 'ymax')
-            ymax.text = str(int(obj['bbox'][3]))
-        
-        # 寫入檔案
-        tree = ET.ElementTree(annotation)
-        tree.write(output_path, encoding='utf-8', xml_declaration=True)
+# ══════════════════════════════════════════════════════════════
+# 標註格式 讀取 / 儲存
+# ══════════════════════════════════════════════════════════════
+
+def load_yolo_annotations(label_path: Path) -> Tuple[list, list, str]:
+    bboxes, class_labels = [], []
+    if label_path.exists():
+        with open(label_path, 'r') as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 5:
+                    class_id = int(parts[0])
+                    bbox = [float(x) for x in parts[1:5]]
+                    bboxes.append(bbox)
+                    class_labels.append(class_id)
+    return bboxes, class_labels, 'yolo'
 
 
-class ImageAugmentator:
-    """影像擴增處理類別"""
-    
-    def __init__(self, augmentation_config: Dict[str, Any] = None):
-        """
-        初始化擴增器
-        
-        Args:
-            augmentation_config (Dict): 擴增參數設定
-        """
-        self.config = augmentation_config or {}
-        self.voc_processor = PascalVOCProcessor()
-        
-        # 設定預設的擴增管道
-        self.augmentation_pipelines = self._create_augmentation_pipelines()
-    
-    def _create_augmentation_pipelines(self) -> Dict[str, Compose]:
-        """
-        建立不同的擴增管道
-        
-        Returns:
-            Dict: 包含不同擴增方法的字典
-        """
-        pipelines = {}
-        
-        # 水平翻轉
-        pipelines['horizontal_flip'] = A.Compose([
-            A.HorizontalFlip(p=1.0)
-        ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['class_labels']))
-        
-        # 亮度對比度調整
-        pipelines['brightness_contrast'] = A.Compose([
-            A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=1.0)
-        ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['class_labels']))
-        
-        # 色調飽和度調整
-        pipelines['hue_saturation'] = A.Compose([
-            A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=1.0)
-        ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['class_labels']))
-        
-        # 混合擴增（同時應用多種技術）
-        pipelines['mixed'] = A.Compose([
-            A.HorizontalFlip(p=0.5),
-            A.RandomBrightnessContrast(brightness_limit=0.15, contrast_limit=0.15, p=0.5),
-            A.HueSaturationValue(hue_shift_limit=15, sat_shift_limit=20, val_shift_limit=15, p=0.5)
-        ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['class_labels']))
-        
-        pipelines['smart_camera'] = A.Compose(
-            [
-                # 1) 尺寸統一
-                A.LongestMaxSize(max_size=960, p=1.0),
-                A.PadIfNeeded(
-                    min_height=960,
-                    min_width=960,
-                    border_mode=cv2.BORDER_CONSTANT,
-                    fill=0,
-                    p=1.0
-                ),
-        
-                # 2) 輕量幾何變換：模擬相機安裝誤差 / 人員站位偏差
-                A.Affine(
-                    scale=(0.95, 1.05),
-                    translate_percent={"x": (-0.03, 0.03), "y": (-0.03, 0.03)},
-                    rotate=(-5, 5),
-                    shear=(-3, 3),
-                    border_mode=cv2.BORDER_CONSTANT,
-                    fill=0,
-                    p=0.6
-                ),
-        
-                # 3) 光照變化：模擬工位亮度波動
-                A.OneOf([
-                    A.RandomBrightnessContrast(
-                        brightness_limit=0.15,
-                        contrast_limit=0.15,
-                        p=1.0
-                    ),
-                    A.RandomGamma(
-                        gamma_limit=(85, 115),
-                        p=1.0
-                    ),
-                ], p=0.5),
-        
-                # 4) 輕量畫質退化：模擬動作模糊 / 對焦波動 / 串流壓縮
-                A.OneOf([
-                    A.MotionBlur(blur_limit=(3, 5), p=1.0),
-                    A.GaussianBlur(blur_limit=(3, 5), p=1.0),
-                    A.ImageCompression(quality_range=(70, 95), p=1.0),
-                ], p=0.25),
-        
-                # 5) 少量遮擋：模擬手部互擋 / 說明書局部被遮
-                A.CoarseDropout(
-                    num_holes_range=(1, 3),
-                    hole_height_range=(0.03, 0.08),
-                    hole_width_range=(0.03, 0.08),
-                    fill=0,
-                    p=0.15
-                ),
-            ],
-            bbox_params=A.BboxParams(
-                format="yolo",              # 或 "pascal_voc"
-                label_fields=["class_labels"],
-                min_visibility=0.3,
-                min_area=16,
-                clip=True
-            )
-        )
-        
-        pipelines['hz_pde'] = A.Compose(
-            [
-                # 1) 幾何：保守
-                A.OneOf([
-                    A.Affine(
-                        scale=(0.95, 1.05),
-                        translate_percent={"x": (-0.03, 0.03), "y": (-0.03, 0.03)},
-                        rotate=(-5, 5),
-                        shear=(-3, 3),
-                        interpolation=cv2.INTER_LINEAR,
-                        border_mode=cv2.BORDER_CONSTANT,
-                        p=1.0,
-                    ),
-                ], p=0.6),
-        
-                # 2) 水平翻轉：只有左右對稱合理時才開
-                A.HorizontalFlip(p=0.5),
-        
-                # 3) 光照 / 顏色：中低強度
-                A.OneOf([
-                    A.RandomBrightnessContrast(
-                        brightness_limit=0.15,
-                        contrast_limit=0.15,
-                        p=1.0
-                    ),
-                    A.ColorJitter(
-                        brightness=0.12,
-                        contrast=0.12,
-                        saturation=0.08,
-                        hue=0.03,
-                        p=1.0
-                    ),
-                ], p=0.5),
-        
-                # 4) 畫質退化 / 模糊：模擬影片
-                A.OneOf([
-                    A.MotionBlur(blur_limit=5, p=1.0),
-                    A.GaussianBlur(blur_limit=(3, 5), p=1.0),
-                    A.ImageCompression(quality_range=(70, 95), p=1.0),
-                    A.GaussNoise(std_range=(0.01, 0.03), p=1.0),
-                ], p=0.35),
-        
-                # 5) 少量遮擋：不要太重
-                A.CoarseDropout(
-                    num_holes_range=(1, 3),
-                    hole_height_range=(0.03, 0.08),
-                    hole_width_range=(0.03, 0.08),
-                    fill=0,
-                    p=0.15,
-                ),
-            ],
-            bbox_params=A.BboxParams(
-                format="pascal_voc",
-                label_fields=["class_labels"],
-                min_area=16,
-                min_visibility=0.3,
-            )
-        )
-        
-        return pipelines
-    
-    def augment_image_with_annotations(self, image_path: str, xml_path: str, 
-                                     output_dir: str, augmentation_types: List[str],
-                                     num_augmentations: int = 1) -> None:
-        """
-        對單一影像及其標註進行擴增
-        
-        Args:
-            image_path (str): 影像檔案路徑
-            xml_path (str): XML 標註檔案路徑
-            output_dir (str): 輸出資料夾路徑
-            augmentation_types (List[str]): 要執行的擴增類型列表
-        """
-        # 讀取影像
-        image = cv2.imread(image_path)
-        if image is None:
-            print(f"錯誤：無法讀取影像 {image_path}")
-            return
-        
-        # 解析 XML 標註
+def save_yolo_annotations(label_path: Path, bboxes: list, class_labels: list, **kwargs):
+    with open(label_path, 'w') as f:
+        for bbox, label in zip(bboxes, class_labels):
+            f.write(f"{int(label)} {' '.join(f'{v:.6f}' for v in bbox)}\n")
+
+
+def load_pascal_voc_annotations(xml_path: Path) -> Tuple[list, list, str]:
+    bboxes, class_labels = [], []
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    for obj in root.findall('object'):
+        name = obj.find('name').text
+        bndbox = obj.find('bndbox')
+        xmin = float(bndbox.find('xmin').text)
+        ymin = float(bndbox.find('ymin').text)
+        xmax = float(bndbox.find('xmax').text)
+        ymax = float(bndbox.find('ymax').text)
+        bboxes.append([xmin, ymin, xmax, ymax])
+        class_labels.append(name)
+    return bboxes, class_labels, 'pascal_voc'
+
+
+def save_pascal_voc_annotations(label_path: Path, bboxes: list, class_labels: list,
+                                 filename: str, width: int, height: int, depth: int = 3, **kwargs):
+    annotation = ET.Element('annotation')
+    ET.SubElement(annotation, 'folder').text = 'augmented'
+    ET.SubElement(annotation, 'filename').text = filename
+    size = ET.SubElement(annotation, 'size')
+    ET.SubElement(size, 'width').text = str(width)
+    ET.SubElement(size, 'height').text = str(height)
+    ET.SubElement(size, 'depth').text = str(depth)
+    for bbox, label in zip(bboxes, class_labels):
+        obj = ET.SubElement(annotation, 'object')
+        ET.SubElement(obj, 'name').text = str(label)
+        ET.SubElement(obj, 'pose').text = 'Unspecified'
+        ET.SubElement(obj, 'truncated').text = '0'
+        ET.SubElement(obj, 'difficult').text = '0'
+        bndbox = ET.SubElement(obj, 'bndbox')
+        ET.SubElement(bndbox, 'xmin').text = str(int(bbox[0]))
+        ET.SubElement(bndbox, 'ymin').text = str(int(bbox[1]))
+        ET.SubElement(bndbox, 'xmax').text = str(int(bbox[2]))
+        ET.SubElement(bndbox, 'ymax').text = str(int(bbox[3]))
+    tree = ET.ElementTree(annotation)
+    ET.indent(tree, space='  ')
+    tree.write(str(label_path), encoding='utf-8', xml_declaration=True)
+
+
+def load_cvat_annotations(xml_path: Path) -> Tuple[list, list, str]:
+    """載入 CVAT for Images XML 格式（bbox 座標與 pascal_voc 相同）"""
+    bboxes, class_labels = [], []
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    for image_tag in root.findall('image'):
+        for box in image_tag.findall('box'):
+            label = box.get('label')
+            xtl = float(box.get('xtl'))
+            ytl = float(box.get('ytl'))
+            xbr = float(box.get('xbr'))
+            ybr = float(box.get('ybr'))
+            bboxes.append([xtl, ytl, xbr, ybr])
+            class_labels.append(label)
+    return bboxes, class_labels, 'pascal_voc'
+
+
+def save_cvat_annotations(label_path: Path, bboxes: list, class_labels: list,
+                           filename: str, width: int, height: int, **kwargs):
+    annotations = ET.Element('annotations')
+    ET.SubElement(annotations, 'version').text = '1.1'
+    image = ET.SubElement(annotations, 'image',
+                           id='0', name=filename, width=str(width), height=str(height))
+    for bbox, label in zip(bboxes, class_labels):
+        ET.SubElement(image, 'box', label=str(label), occluded='0', source='manual',
+                      xtl=str(bbox[0]), ytl=str(bbox[1]),
+                      xbr=str(bbox[2]), ybr=str(bbox[3]), z_order='0')
+    tree = ET.ElementTree(annotations)
+    ET.indent(tree, space='  ')
+    tree.write(str(label_path), encoding='utf-8', xml_declaration=True)
+
+
+def detect_and_load_annotations(
+    image_path: Path,
+    labels_dir: Path
+) -> Tuple[Optional[list], Optional[list], Optional[str], Optional[Callable], Optional[str]]:
+    """
+    自動偵測並載入對應的標籤檔。
+    回傳 (bboxes, class_labels, ann_format, save_func, ann_ext)，
+    偵測不到時回傳 (None, None, None, None, None)。
+    """
+    base_name = image_path.stem
+
+    xml_path = labels_dir / f'{base_name}.xml'
+    if xml_path.exists():
         try:
-            annotation_data = self.voc_processor.parse_xml(xml_path)
-        except Exception as e:
-            print(f"錯誤：無法解析 XML 檔案 {xml_path}，錯誤訊息：{e}")
-            return
-        
-        # 準備邊界框資料 (albumentations 格式)
-        bboxes = []
-        class_labels = []
-        for obj in annotation_data['objects']:
-            bboxes.append(obj['bbox'])
-            class_labels.append(obj['name'])
-        
-        # 取得檔案名稱（不含副檔名）
-        base_name = Path(image_path).stem
-        image_ext = Path(image_path).suffix
-        
-        # 對每種指定的擴增方法進行處理
-        for aug_type in augmentation_types:
-            if aug_type not in self.augmentation_pipelines:
-                print(f"警告：不支援的擴增類型 '{aug_type}'，跳過")
-                continue
-            
-            for i in range(num_augmentations):
-                try:
-                    # 執行擴增
-                    augmented = self.augmentation_pipelines[aug_type](
-                        image=image, 
-                        bboxes=bboxes, 
-                        class_labels=class_labels
-                    )
-                    
-                    augmented_image = augmented['image']
-                    augmented_bboxes = augmented['bboxes']
-                    augmented_labels = augmented['class_labels']
-                    
-                    suffix = f"{aug_type}_{i+1}" if num_augmentations > 1 else aug_type
-                    
-                    # 如果邊界框為空（可能被裁切掉了），跳過這次擴增
-                    if len(augmented_bboxes) == 0:
-                        print(f"警告：擴增後物件全部被裁切，跳過 {base_name}_{suffix}")
-                        continue
-                    
-                    # 更新標註資料
-                    updated_annotation = annotation_data.copy()
-                    updated_annotation['filename'] = f"{base_name}_{suffix}{image_ext}"
-                    updated_annotation['height'], updated_annotation['width'] = augmented_image.shape[:2]
-                    
-                    # 更新物件標註
-                    updated_objects = []
-                    for bbox, label in zip(augmented_bboxes, augmented_labels):
-                        updated_objects.append({
-                            'name': label,
-                            'bbox': bbox
-                        })
-                    updated_annotation['objects'] = updated_objects
-                    
-                    # 儲存擴增後的影像
-                    output_image_path = os.path.join(output_dir, f"{base_name}_{suffix}{image_ext}")
-                    cv2.imwrite(output_image_path, augmented_image)
-                    
-                    # 儲存更新後的 XML
-                    output_xml_path = os.path.join(output_dir, f"{base_name}_{suffix}.xml")
-                    self.voc_processor.create_xml(updated_annotation, output_xml_path)
-                    
-                    print(f"✓ 完成擴增：{base_name}_{suffix}")
-                    
-                except Exception as e:
-                    print(f"錯誤：處理 {base_name} 的 {aug_type} (第{i+1}次) 擴增時發生錯誤：{e}")
-                    continue
-    
-    def batch_augment(self, input_dir: str, output_dir: str, 
-                     augmentation_types: List[str], num_augmentations: int = 1) -> None:
-        """
-        批次處理資料夾中的所有影像和標註
-        
-        Args:
-            input_dir (str): 輸入資料夾路徑
-            output_dir (str): 輸出資料夾路徑
-            augmentation_types (List[str]): 要執行的擴增類型列表
-        """
-        # 建立輸出資料夾
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # 取得所有影像檔案
-        image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff'}
-        image_files = []
-        
-        for ext in image_extensions:
-            image_files.extend(Path(input_dir).glob(f"*{ext}"))
-            image_files.extend(Path(input_dir).glob(f"*{ext.upper()}"))
-        
-        print(f"找到 {len(image_files)} 個影像檔案")
-        
-        processed_count = 0
-        
-        for image_file in image_files:
-            # 尋找對應的 XML 檔案
-            xml_file = image_file.with_suffix('.xml')
-            
-            if not xml_file.exists():
-                print(f"警告：找不到對應的 XML 檔案 {xml_file}，跳過 {image_file.name}")
-                continue
-            
-            print(f"處理中：{image_file.name}")
-            
-            # 進行擴增
-            self.augment_image_with_annotations(
-                str(image_file), 
-                str(xml_file), 
-                output_dir, 
-                augmentation_types,
-                num_augmentations
-            )
-            
-            processed_count += 1
-        
-        print(f"\n處理完成！總共處理了 {processed_count} 對影像/XML 檔案")
-        print(f"擴增後的檔案已儲存至：{output_dir}")
+            tree = ET.parse(xml_path)
+            root = tree.getroot()
+            if root.tag == 'annotations':
+                bboxes, labels, fmt = load_cvat_annotations(xml_path)
+                return bboxes, labels, fmt, save_cvat_annotations, '.xml'
+            else:
+                bboxes, labels, fmt = load_pascal_voc_annotations(xml_path)
+                return bboxes, labels, fmt, save_pascal_voc_annotations, '.xml'
+        except ET.ParseError:
+            print(f'警告：XML 檔案 {xml_path} 解析失敗，跳過。')
+            return None, None, None, None, None
 
+    txt_path = labels_dir / f'{base_name}.txt'
+    if txt_path.exists():
+        bboxes, labels, fmt = load_yolo_annotations(txt_path)
+        return bboxes, labels, fmt, save_yolo_annotations, '.txt'
+
+    return None, None, None, None, None
+
+
+# ══════════════════════════════════════════════════════════════
+# 擴增管道定義
+# ══════════════════════════════════════════════════════════════
+
+# 各有標註管道的 transforms list（不含 bbox_params，執行時動態組合）
+ANNOTATED_PIPELINE_TRANSFORMS: Dict[str, list] = {
+    'horizontal_flip': [
+        A.HorizontalFlip(p=1.0),
+    ],
+    'brightness_contrast': [
+        A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=1.0),
+    ],
+    'hue_saturation': [
+        A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=1.0),
+    ],
+    'mixed': [
+        A.HorizontalFlip(p=0.5),
+        A.RandomBrightnessContrast(brightness_limit=0.15, contrast_limit=0.15, p=0.5),
+        A.HueSaturationValue(hue_shift_limit=15, sat_shift_limit=20, val_shift_limit=15, p=0.5),
+    ],
+    'smart_camera': [
+        A.LongestMaxSize(max_size=960, p=1.0),
+        A.PadIfNeeded(min_height=960, min_width=960,
+                      border_mode=cv2.BORDER_CONSTANT, fill=0, p=1.0),
+        A.Affine(scale=(0.95, 1.05),
+                 translate_percent={'x': (-0.03, 0.03), 'y': (-0.03, 0.03)},
+                 rotate=(-5, 5), shear=(-3, 3),
+                 border_mode=cv2.BORDER_CONSTANT, fill=0, p=0.6),
+        A.OneOf([
+            A.RandomBrightnessContrast(brightness_limit=0.15, contrast_limit=0.15, p=1.0),
+            A.RandomGamma(gamma_limit=(85, 115), p=1.0),
+        ], p=0.5),
+        A.OneOf([
+            A.MotionBlur(blur_limit=(3, 5), p=1.0),
+            A.GaussianBlur(blur_limit=(3, 5), p=1.0),
+            A.ImageCompression(quality_range=(70, 95), p=1.0),
+        ], p=0.25),
+        A.CoarseDropout(num_holes_range=(1, 3),
+                        hole_height_range=(0.03, 0.08),
+                        hole_width_range=(0.03, 0.08),
+                        fill=0, p=0.15),
+    ],
+    'hz_pde': [
+        A.OneOf([
+            A.Affine(scale=(0.95, 1.05),
+                     translate_percent={'x': (-0.03, 0.03), 'y': (-0.03, 0.03)},
+                     rotate=(-5, 5), shear=(-3, 3),
+                     interpolation=cv2.INTER_LINEAR,
+                     border_mode=cv2.BORDER_CONSTANT, p=1.0),
+        ], p=0.6),
+        A.HorizontalFlip(p=0.5),
+        A.OneOf([
+            A.RandomBrightnessContrast(brightness_limit=0.15, contrast_limit=0.15, p=1.0),
+            A.ColorJitter(brightness=0.12, contrast=0.12, saturation=0.08, hue=0.03, p=1.0),
+        ], p=0.5),
+        A.OneOf([
+            A.MotionBlur(blur_limit=5, p=1.0),
+            A.GaussianBlur(blur_limit=(3, 5), p=1.0),
+            A.ImageCompression(quality_range=(70, 95), p=1.0),
+            A.GaussNoise(std_range=(0.01, 0.03), p=1.0),
+        ], p=0.35),
+        A.CoarseDropout(num_holes_range=(1, 3),
+                        hole_height_range=(0.03, 0.08),
+                        hole_width_range=(0.03, 0.08),
+                        fill=0, p=0.15),
+    ],
+}
+
+# 旋轉管道的基礎 transforms（rotation 管道專用）
+_ROTATION_BASE_TRANSFORMS = [
+    A.HorizontalFlip(p=0.5),
+    A.Perspective(scale=(0.05, 0.1), p=0.3),
+    A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+    A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=0.3),
+]
+
+# 純影像擴增管道（無標註，不需要 bbox_params）
+IMAGE_ONLY_PIPELINE = A.Compose([
+    A.SafeRotate(limit=45, p=0.6, border_mode=cv2.BORDER_CONSTANT),
+    A.Perspective(scale=(0.02, 0.08), p=0.4),
+    A.OneOf([
+        A.MotionBlur(blur_limit=7, p=1.0),
+        A.MedianBlur(blur_limit=5, p=1.0),
+        A.GaussianBlur(blur_limit=5, p=1.0),
+    ], p=0.3),
+    A.OneOf([
+        A.GaussNoise(std_range=(0.05, 0.15), mean_range=(0.0, 0.0),
+                     per_channel=True, noise_scale_factor=1.0, p=1.0),
+        A.ISONoise(color_shift=(0.01, 0.05), intensity=(0.1, 0.5), p=1.0),
+    ], p=0.2),
+    A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8), p=0.5),
+    A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=0.5),
+    A.HueSaturationValue(hue_shift_limit=30, sat_shift_limit=30, val_shift_limit=20, p=0.4),
+    A.CoarseDropout(num_holes_range=(2, 6),
+                    hole_height_range=(0.025, 0.075),
+                    hole_width_range=(0.025, 0.075),
+                    fill='random_uniform', p=0.3),
+])
+
+
+def build_pipeline(transforms_list: list, ann_format: str,
+                   min_visibility: float = 0.2) -> A.Compose:
+    """根據標註格式動態建立帶 bbox_params 的 A.Compose"""
+    return A.Compose(
+        transforms_list,
+        bbox_params=A.BboxParams(
+            format=ann_format,
+            label_fields=['class_labels'],
+            min_visibility=min_visibility,
+            min_area=16,
+            clip=True,
+        )
+    )
+
+
+def build_rotation_transforms(rotate_limit: Optional[int],
+                               rotate_step: Optional[int]) -> Tuple[list, bool]:
+    """
+    建立旋轉管道的 transforms list。
+    回傳 (transforms_list, is_fixed_step)。
+    is_fixed_step=True 表示需要在主迴圈中使用固定角度模式。
+    """
+    if rotate_step is not None:
+        print(f'啟用固定角度步長旋轉，步長: {rotate_step}°')
+        return _ROTATION_BASE_TRANSFORMS, True
+    elif rotate_limit is not None:
+        print(f'啟用隨機角度旋轉，範圍: ±{rotate_limit}°')
+        rotation = [
+            A.Rotate(limit=rotate_limit, p=0.7,
+                     border_mode=cv2.BORDER_CONSTANT, fill_value=0),
+            A.Affine(scale=(0.9, 1.1), translate_percent=0.1, p=0.5,
+                     border_mode=cv2.BORDER_CONSTANT, fill_value=0),
+        ]
+        return rotation + _ROTATION_BASE_TRANSFORMS, False
+    else:
+        print('啟用 90/180/270° 固定角度旋轉')
+        return [A.RandomRotate90(p=0.75)] + _ROTATION_BASE_TRANSFORMS, False
+
+
+# ══════════════════════════════════════════════════════════════
+# 純影像擴增模式
+# ══════════════════════════════════════════════════════════════
+
+def run_image_only(images_dir: Path, output_dir: Path, num_augmentations: int):
+    """純影像擴增（無標註），對應原 augment_image_only.py 的功能"""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    valid_ext = {'.jpg', '.jpeg', '.png', '.bmp'}
+    img_files = [f for f in images_dir.iterdir() if f.suffix.lower() in valid_ext]
+
+    if not img_files:
+        print(f'[提示] 在 {images_dir} 中找不到影像檔案。')
+        return
+
+    print(f'找到 {len(img_files)} 張影像，開始純影像擴增...')
+    for img_path in tqdm(img_files):
+        image_bgr = cv2.imread(str(img_path))
+        if image_bgr is None:
+            print(f'[警告] 無法讀取影像: {img_path.name}')
+            continue
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        for i in range(num_augmentations):
+            prefix = f'aug_{i + 1}_' if num_augmentations > 1 else 'aug_'
+            try:
+                transformed = IMAGE_ONLY_PIPELINE(image=image_rgb)
+                aug_rgb = transformed['image']
+            except Exception as e:
+                print(f'[錯誤] 處理 {img_path.name} 第 {i + 1} 次時發生例外：{e}')
+                continue
+            out_name = f'{prefix}{img_path.name}'
+            cv2.imwrite(str(output_dir / out_name),
+                        cv2.cvtColor(aug_rgb, cv2.COLOR_RGB2BGR))
+
+    print(f'純影像擴增完成！輸出目錄：{output_dir}')
+
+
+# ══════════════════════════════════════════════════════════════
+# 標註同步擴增模式
+# ══════════════════════════════════════════════════════════════
+
+def augment_single(image_path: Path, bboxes: list, class_labels: list,
+                   ann_format: str, save_func: Callable, ann_ext: str,
+                   pipeline_name: str, transforms_list: list,
+                   output_images_dir: Path, output_labels_dir: Path,
+                   suffix: str) -> bool:
+    """
+    對單張影像執行一次擴增並儲存結果。
+    回傳是否成功。
+    """
+    image_bgr = cv2.imread(str(image_path))
+    if image_bgr is None:
+        return False
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+
+    transform = build_pipeline(transforms_list, ann_format)
+    try:
+        augmented = transform(image=image_rgb, bboxes=bboxes, class_labels=class_labels)
+    except Exception as e:
+        print(f'  錯誤：{image_path.name} ({pipeline_name}) 擴增失敗：{e}')
+        return False
+
+    aug_bboxes = augmented['bboxes']
+    aug_labels = augmented['class_labels']
+    if not aug_bboxes:
+        return False  # 物件全部超出邊界，跳過
+
+    aug_image = augmented['image']
+    aug_h, aug_w = aug_image.shape[:2]
+    new_stem = f'{image_path.stem}_{suffix}'
+    new_img_name = f'{new_stem}{image_path.suffix}'
+
+    cv2.imwrite(str(output_images_dir / new_img_name),
+                cv2.cvtColor(aug_image, cv2.COLOR_RGB2BGR))
+    save_func(
+        output_labels_dir / f'{new_stem}{ann_ext}',
+        aug_bboxes, aug_labels,
+        filename=new_img_name, width=aug_w, height=aug_h, depth=3,
+    )
+    return True
+
+
+def run_annotated_augmentation(
+    images_dir: Path,
+    labels_dir: Path,
+    output_dir: Path,
+    augmentation_types: List[str],
+    num_augmentations: int,
+    rotate_limit: Optional[int],
+    rotate_step: Optional[int],
+):
+    """標註同步擴增，支援 VOC / YOLO / CVAT 自動偵測"""
+    output_images_dir = output_dir / 'images'
+    output_labels_dir = output_dir / 'labels'
+    output_images_dir.mkdir(parents=True, exist_ok=True)
+    output_labels_dir.mkdir(parents=True, exist_ok=True)
+
+    valid_ext = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff'}
+    image_files = [f for f in images_dir.iterdir()
+                   if f.suffix.lower() in valid_ext]
+
+    if not image_files:
+        print(f'[提示] 在 {images_dir} 中找不到影像檔案。')
+        return
+
+    print(f'找到 {len(image_files)} 張影像，開始標註同步擴增...')
+
+    # 預先建立旋轉 transforms（若有指定 rotation 管道）
+    rotation_transforms = None
+    is_fixed_step = False
+    if 'rotation' in augmentation_types:
+        rotation_transforms, is_fixed_step = build_rotation_transforms(rotate_limit, rotate_step)
+
+    success_count = 0
+    for image_path in tqdm(image_files):
+        bboxes, class_labels, ann_format, save_func, ann_ext = \
+            detect_and_load_annotations(image_path, labels_dir)
+
+        if bboxes is None:
+            tqdm.write(f'警告：找不到 {image_path.name} 的標籤檔，跳過。')
+            continue
+
+        for aug_type in augmentation_types:
+            # ── rotation 管道 ──
+            if aug_type == 'rotation':
+                if rotation_transforms is None:
+                    continue
+                if is_fixed_step:
+                    # 固定步長：每個步長角度產生一個版本
+                    num_steps = 360 // rotate_step
+                    for step_idx in range(num_steps):
+                        angle = step_idx * rotate_step
+                        step_transforms = [
+                            A.Rotate(limit=(angle, angle), p=1.0,
+                                     border_mode=cv2.BORDER_CONSTANT, fill_value=0)
+                        ] + rotation_transforms
+                        suffix = f'rot{angle}'
+                        augment_single(
+                            image_path, bboxes, class_labels, ann_format,
+                            save_func, ann_ext, aug_type, step_transforms,
+                            output_images_dir, output_labels_dir, suffix,
+                        )
+                else:
+                    for i in range(num_augmentations):
+                        suffix = f'rotation_{i + 1}' if num_augmentations > 1 else 'rotation'
+                        ok = augment_single(
+                            image_path, bboxes, class_labels, ann_format,
+                            save_func, ann_ext, aug_type, rotation_transforms,
+                            output_images_dir, output_labels_dir, suffix,
+                        )
+                        if ok:
+                            success_count += 1
+
+            # ── 一般管道 ──
+            elif aug_type in ANNOTATED_PIPELINE_TRANSFORMS:
+                transforms_list = ANNOTATED_PIPELINE_TRANSFORMS[aug_type]
+                for i in range(num_augmentations):
+                    suffix = f'{aug_type}_{i + 1}' if num_augmentations > 1 else aug_type
+                    ok = augment_single(
+                        image_path, bboxes, class_labels, ann_format,
+                        save_func, ann_ext, aug_type, transforms_list,
+                        output_images_dir, output_labels_dir, suffix,
+                    )
+                    if ok:
+                        success_count += 1
+            else:
+                tqdm.write(f'警告：不支援的擴增類型 "{aug_type}"，跳過。')
+
+    print(f'\n擴增完成！成功產生 {success_count} 組影像/標籤')
+    print(f'  影像輸出：{output_images_dir}')
+    print(f'  標籤輸出：{output_labels_dir}')
+
+
+# ══════════════════════════════════════════════════════════════
+# 主程式
+# ══════════════════════════════════════════════════════════════
 
 def main():
-    """主程式入口"""
+    ALL_ANNOTATED_TYPES = list(ANNOTATED_PIPELINE_TRANSFORMS.keys()) + ['rotation']
+
     parser = argparse.ArgumentParser(
-        description="影像擴增腳本 - 同步處理影像和 PASCAL VOC 標註",
+        description='影像擴增腳本 — 支援 VOC/YOLO/CVAT 標註同步擴增及純影像擴增',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-            可用的擴增類型：
-            horizontal_flip     - 水平翻轉
-            brightness_contrast - 亮度對比度調整
-            hue_saturation      - 色調飽和度調整
-            mixed               - 混合擴增（同時應用多種技術）
-            smart_camera        - smart camera
-            hz_pde              - HZ PDE
-            
+可用的擴增類型（-a）：
+  horizontal_flip     水平翻轉
+  brightness_contrast 亮度對比度調整
+  hue_saturation      色調飽和度調整
+  mixed               混合擴增
+  smart_camera        Smart Camera 擴增（含 resize/pad/光照/模糊）
+  hz_pde              HZ PDE 擴增（保守幾何 + 光照 + 模糊）
+  rotation            旋轉擴增（搭配 --rotate_limit 或 --rotate_step）
+  image_only          純影像擴增管道（需加 --image_only 旗標）
 
-            使用範例：
-            python augment_images.py -i ./dataset -o ./augmented_dataset -a horizontal_flip rotation
-            python augment_images.py -i ./dataset -o ./augmented_dataset -a mixed -n 5
-            python augment_images.py -i ./data -o ./output -a mixed
-        """
+使用範例：
+  # VOC（images 與 XML 同資料夾）
+  python image_augmentation_script.py -i ./dataset -o ./out -a mixed -n 3
+
+  # YOLO / 多格式（images 與 labels 分開）
+  python image_augmentation_script.py -i ./images -l ./labels -o ./out -a hz_pde -n 5
+
+  # 旋轉（固定步長）
+  python image_augmentation_script.py -i ./images -l ./labels -o ./out -a rotation --rotate_step 45
+
+  # 純影像擴增
+  python image_augmentation_script.py -i ./images -o ./out --image_only -n 3
+        """,
     )
-    
-    parser.add_argument('-i', '--input_dir', type=str, required=True,
-                       help='輸入資料夾路徑（包含影像和 XML 檔案）')
-    
+
+    parser.add_argument('-i', '--images_dir', type=str, required=True,
+                        help='輸入影像資料夾路徑')
+    parser.add_argument('-l', '--labels_dir', type=str, default=None,
+                        help='標籤資料夾路徑（預設與 images_dir 相同，適用 VOC 同資料夾格式）')
     parser.add_argument('-o', '--output_dir', type=str, required=True,
-                       help='輸出資料夾路徑')
-    
-    parser.add_argument('-a', '--augmentations', nargs='+', 
-                       choices=['horizontal_flip', 'brightness_contrast', 'hue_saturation', 'mixed', 'smart_camera', 'hz_pde'],
-                       default=['horizontal_flip'],
-                       help='要執行的擴增類型（可指定多個）')
-    
+                        help='輸出資料夾路徑（標註模式會建立 images/ 和 labels/ 子目錄）')
+    parser.add_argument('-a', '--augmentations', nargs='+',
+                        choices=ALL_ANNOTATED_TYPES,
+                        default=['mixed'],
+                        help='要執行的擴增類型（可指定多個）')
     parser.add_argument('-n', '--num_augmentations', type=int, default=1,
-                       help='每種擴增類型要產生的影像數量倍數 (預設: 1)')
-    
+                        help='每種擴增類型要產生的版本數量（預設：1）')
+    parser.add_argument('--rotate_limit', type=int, default=None,
+                        help='[rotation] 隨機旋轉最大角度，例如 40 表示 ±40°')
+    parser.add_argument('--rotate_step', type=int, default=None,
+                        help='[rotation] 固定旋轉步長（度），例如 45 會產生 0°/45°/90°/... 版本')
+    parser.add_argument('--image_only', action='store_true',
+                        help='純影像擴增模式（不處理標籤，使用專用管道）')
     parser.add_argument('--seed', type=int, default=42,
-                       help='隨機種子（確保結果可重現）')
-    
+                        help='隨機種子（預設：42）')
+
     args = parser.parse_args()
-    
+
     # 設定隨機種子
     random.seed(args.seed)
     np.random.seed(args.seed)
-    
-    # 檢查輸入資料夾是否存在
-    if not os.path.exists(args.input_dir):
-        print(f"錯誤：輸入資料夾 '{args.input_dir}' 不存在")
+
+    images_dir = Path(args.images_dir)
+    labels_dir = Path(args.labels_dir) if args.labels_dir else images_dir
+    output_dir = Path(args.output_dir)
+
+    if not images_dir.exists():
+        print(f'錯誤：輸入影像資料夾 "{images_dir}" 不存在')
         return
-    
-    print("=" * 60)
-    print("影像擴增腳本")
-    print("=" * 60)
-    print(f"輸入資料夾：{args.input_dir}")
-    print(f"輸出資料夾：{args.output_dir}")
-    print(f"擴增類型：{', '.join(args.augmentations)}")
-    print(f"擴增倍數：{args.num_augmentations}")
-    print(f"隨機種子：{args.seed}")
-    print("=" * 60)
-    
-    # 建立擴增器並執行批次處理
-    augmentator = ImageAugmentator()
-    augmentator.batch_augment(args.input_dir, args.output_dir, args.augmentations, args.num_augmentations)
-    
-    print("=" * 60)
-    print("處理完成！")
+
+    print('=' * 60)
+    print('影像擴增腳本')
+    print('=' * 60)
+    print(f'影像來源：{images_dir}')
+    if not args.image_only:
+        print(f'標籤來源：{labels_dir}')
+    print(f'輸出目錄：{output_dir}')
+    print(f'模式    ：{"純影像擴增" if args.image_only else "標註同步擴增"}')
+    if not args.image_only:
+        print(f'擴增類型：{", ".join(args.augmentations)}')
+    print(f'擴增倍數：{args.num_augmentations}')
+    print(f'隨機種子：{args.seed}')
+    print('=' * 60)
+
+    if args.image_only:
+        run_image_only(images_dir, output_dir, args.num_augmentations)
+    else:
+        if not labels_dir.exists():
+            print(f'錯誤：標籤資料夾 "{labels_dir}" 不存在')
+            return
+        run_annotated_augmentation(
+            images_dir=images_dir,
+            labels_dir=labels_dir,
+            output_dir=output_dir,
+            augmentation_types=args.augmentations,
+            num_augmentations=args.num_augmentations,
+            rotate_limit=args.rotate_limit,
+            rotate_step=args.rotate_step,
+        )
+
+    print('=' * 60)
+    print('全部完成！')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
