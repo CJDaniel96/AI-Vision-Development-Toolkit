@@ -142,33 +142,6 @@ class ImageBrightnessDetector:
             'dynamic_range': dynamic_range
         }
     
-    def calculate_contrast_and_edges(self, gray_image):
-        """
-        計算圖像的對比度和邊緣密度
-        
-        Args:
-            gray_image (numpy.ndarray): 灰度圖像
-            
-        Returns:
-            dict: 包含對比度和邊緣資訊的字典
-        """
-        # 計算對比度（標準差）
-        contrast = np.std(gray_image)
-        
-        # 使用Canny邊緣檢測
-        edges = cv2.Canny(gray_image, 50, 150)
-        edge_density = np.sum(edges > 0) / edges.size
-        
-        # 計算局部對比度（使用拉普拉斯算子）
-        laplacian = cv2.Laplacian(gray_image, cv2.CV_64F)
-        local_contrast = np.var(laplacian)
-        
-        return {
-            'contrast': contrast,
-            'edge_density': edge_density,
-            'local_contrast': local_contrast
-        }
-    
     def assess_usability_advanced(self, brightness, advanced_metrics):
         """
         使用進階指標評估圖像是否適合作為訓練資料（針對電子元件優化）
@@ -208,9 +181,8 @@ class ImageBrightnessDetector:
         # 可用性判定：
         # 主要條件：文字清晰 AND (細節豐富 OR 結構清晰) AND 最低亮度
         # 或者：總分超過65分
-        is_usable = ((text_ok and (detail_ok or structure_ok) and brightness_acceptable) or 
+        is_usable = ((text_ok and (detail_ok or structure_ok) and brightness_acceptable) or
                     total_score >= 65)
-        breakpoint()
         return {
             'is_usable': is_usable,
             'total_score': total_score,
