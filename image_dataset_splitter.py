@@ -10,14 +10,27 @@
 
 import os
 import shutil
-import glob
+import random
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Union
-from sklearn.model_selection import train_test_split
 import argparse
 import logging
 import sys
 from dataclasses import dataclass
+
+
+def split_items(items: List[Dict], train_size: float, random_state: int) -> Tuple[List[Dict], List[Dict]]:
+    """依指定比例與隨機種子切分列表。"""
+    if len(items) < 2:
+        raise ValueError("至少需要 2 個影像檔案才能切分資料集")
+
+    shuffled_items = list(items)
+    random.Random(random_state).shuffle(shuffled_items)
+
+    train_count = int(len(shuffled_items) * train_size)
+    train_count = max(1, min(len(shuffled_items) - 1, train_count))
+
+    return shuffled_items[:train_count], shuffled_items[train_count:]
 
 
 @dataclass
@@ -98,24 +111,25 @@ class ImageDatasetSplitter:
             
     def find_image_files(self) -> List[Path]:
         """
-        尋找所有影像檔案
+        尋找所有影像檔案，包含來源資料夾底下的子資料夾
         
         Returns:
             影像檔案路徑列表
         """
         image_files = []
-        
-        for ext in self.SUPPORTED_IMAGE_EXTENSIONS:
-            # 使用 glob 尋找所有符合的檔案（不區分大小寫）
-            pattern = str(self.source_dir / f"*{ext}")
-            image_files.extend(glob.glob(pattern, recursive=False))
-            
-            # 也搜尋大寫版本
-            pattern = str(self.source_dir / f"*{ext.upper()}")
-            image_files.extend(glob.glob(pattern, recursive=False))
-            
-        # 轉換為 Path 物件並去重
-        image_files = list(set([Path(f) for f in image_files]))
+
+        for path in self.source_dir.rglob("*"):
+            if not path.is_file():
+                continue
+
+            if self.output_dir.exists() and path.resolve().is_relative_to(self.output_dir.resolve()):
+                continue
+
+            if path.suffix.lower() in self.SUPPORTED_IMAGE_EXTENSIONS:
+                image_files.append(path)
+
+        # 去重
+        image_files = list(set(image_files))
         image_files.sort()  # 排序以確保一致性
         
         self.logger.info(f"找到 {len(image_files)} 個影像檔案")
@@ -189,22 +203,20 @@ class ImageDatasetSplitter:
         if self.config.create_val_set:
             # 三分割: train/val/test
             # 先分出訓練集
-            train_pairs, temp_pairs = train_test_split(
+            train_pairs, temp_pairs = split_items(
                 file_pairs,
-                train_size=self.config.train_size,
-                random_state=self.config.random_state,
-                shuffle=True
+                self.config.train_size,
+                self.config.random_state
             )
             
             # 從剩餘的資料中分出驗證集和測試集
             remaining_size = 1 - self.config.train_size
             val_ratio = self.config.val_size / remaining_size
             
-            val_pairs, test_pairs = train_test_split(
+            val_pairs, test_pairs = split_items(
                 temp_pairs,
-                train_size=val_ratio,
-                random_state=self.config.random_state,
-                shuffle=True
+                val_ratio,
+                self.config.random_state
             )
             
             self.logger.info(f"訓練集大小: {len(train_pairs)} ({len(train_pairs)/len(file_pairs)*100:.1f}%)")
@@ -213,11 +225,10 @@ class ImageDatasetSplitter:
             
         else:
             # 二分割: train/test
-            train_pairs, test_pairs = train_test_split(
+            train_pairs, test_pairs = split_items(
                 file_pairs,
-                train_size=self.config.train_size,
-                random_state=self.config.random_state,
-                shuffle=True
+                self.config.train_size,
+                self.config.random_state
             )
             
             self.logger.info(f"訓練集大小: {len(train_pairs)} ({len(train_pairs)/len(file_pairs)*100:.1f}%)")
@@ -299,14 +310,16 @@ class ImageDatasetSplitter:
             try:
                 # 複製影像檔案
                 image_src = pair['image']
-                image_dst = images_dir / image_src.name
+                image_dst = images_dir / image_src.relative_to(self.source_dir)
+                image_dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(image_src, image_dst)
                 copied_images += 1
                 
                 # 複製標記檔（如果存在）
                 if pair['annotation'] and labels_dir:
                     annotation_src = pair['annotation']
-                    annotation_dst = labels_dir / annotation_src.name
+                    annotation_dst = labels_dir / annotation_src.relative_to(self.source_dir)
+                    annotation_dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(annotation_src, annotation_dst)
                     copied_annotations += 1
                     
