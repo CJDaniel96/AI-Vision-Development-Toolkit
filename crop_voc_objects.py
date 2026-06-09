@@ -104,12 +104,38 @@ def clamp_bbox(xmin, ymin, xmax, ymax, width, height):
     return xmin, ymin, xmax, ymax
  
  
+def resize_crop(crop: Image.Image, target_size: tuple, mode: str) -> Image.Image:
+    """
+    將裁切影像調整至目標尺寸。
+    mode='stretch'   : 直接拉伸，不保持比例
+    mode='letterbox' : 保持比例縮放，其餘位置填黑
+    """
+    tw, th = target_size
+    if mode == "stretch":
+        return crop.resize((tw, th), Image.LANCZOS)
+
+    # letterbox: 等比例縮放後置中，其餘填黑
+    cw, ch = crop.size
+    scale = min(tw / cw, th / ch)
+    new_w = int(cw * scale)
+    new_h = int(ch * scale)
+    resized = crop.resize((new_w, new_h), Image.LANCZOS)
+
+    canvas = Image.new("RGB", (tw, th), (0, 0, 0))
+    paste_x = (tw - new_w) // 2
+    paste_y = (th - new_h) // 2
+    canvas.paste(resized, (paste_x, paste_y))
+    return canvas
+
+
 def crop_objects_from_annotation(
     xml_path: Path,
     images_dir: Path,
     output_dir: Path,
     include_difficult: bool = False,
     only_classes=None,
+    resize: tuple = None,
+    resize_mode: str = "letterbox",
 ):
     """
     從單一 VOC XML 裁切物件
@@ -117,32 +143,32 @@ def crop_objects_from_annotation(
     """
     data = parse_voc_xml(xml_path)
     image_path = find_image_for_xml(xml_path, images_dir)
- 
+
     if image_path is None:
         print(f"[WARN] 找不到對應影像: {xml_path.name}", file=sys.stderr)
         return 0
- 
+
     try:
         image = Image.open(image_path).convert("RGB")
     except Exception as e:
         print(f"[WARN] 無法開啟影像 {image_path.name}: {e}", file=sys.stderr)
         return 0
- 
+
     width, height = image.size
     saved_count = 0
- 
+
     for idx, obj in enumerate(data["objects"], start=1):
         cls_name = obj["name"] or "unknown"
- 
+
         if only_classes and cls_name not in only_classes:
             continue
- 
+
         if not include_difficult and obj["difficult"] == 1:
             continue
- 
+
         xmin, ymin, xmax, ymax = obj["bbox"]
         xmin, ymin, xmax, ymax = clamp_bbox(xmin, ymin, xmax, ymax, width, height)
- 
+
         # 避免無效框
         if xmax <= xmin or ymax <= ymin:
             print(
@@ -150,12 +176,15 @@ def crop_objects_from_annotation(
                 file=sys.stderr
             )
             continue
- 
+
         crop = image.crop((xmin, ymin, xmax, ymax))
- 
+
+        if resize is not None:
+            crop = resize_crop(crop, resize, resize_mode)
+
         class_dir = output_dir / sanitize_name(cls_name)
         class_dir.mkdir(parents=True, exist_ok=True)
- 
+
         out_name = (
             f"{image_path.stem}"
             f"__obj{idx:03d}"
@@ -163,13 +192,13 @@ def crop_objects_from_annotation(
             f"__x{xmin}_y{ymin}_x{xmax}_y{ymax}.jpg"
         )
         out_path = class_dir / out_name
- 
+
         try:
             crop.save(out_path, quality=95)
             saved_count += 1
         except Exception as e:
             print(f"[WARN] 儲存失敗 {out_path}: {e}", file=sys.stderr)
- 
+
     return saved_count
  
  
@@ -206,14 +235,34 @@ def main():
         default=None,
         help="只裁切指定類別，例如: --classes cat dog person"
     )
- 
+    parser.add_argument(
+        "--resize",
+        nargs=2,
+        type=int,
+        metavar=("WIDTH", "HEIGHT"),
+        default=None,
+        help="將裁切影像調整至指定尺寸，例如: --resize 224 224"
+    )
+    parser.add_argument(
+        "--resize-mode",
+        choices=["stretch", "letterbox"],
+        default="letterbox",
+        help=(
+            "resize 模式 (預設: letterbox)。"
+            "stretch: 直接拉伸至目標尺寸；"
+            "letterbox: 保持比例縮放，其餘位置填黑"
+        )
+    )
+
     args = parser.parse_args()
- 
+
     images_dir = args.images
     annotations_dir = args.annotations
     output_dir = args.output
     include_difficult = args.include_difficult
     only_classes = set(args.classes) if args.classes else None
+    resize = tuple(args.resize) if args.resize else None
+    resize_mode = args.resize_mode
  
     if not images_dir.exists() or not images_dir.is_dir():
         print(f"[ERROR] 影像資料夾不存在或不是資料夾: {images_dir}", file=sys.stderr)
@@ -240,6 +289,8 @@ def main():
             output_dir=output_dir,
             include_difficult=include_difficult,
             only_classes=only_classes,
+            resize=resize,
+            resize_mode=resize_mode,
         )
         total_saved += saved
         total_xml += 1
