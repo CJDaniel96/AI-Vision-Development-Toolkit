@@ -96,10 +96,16 @@
   ```
 
 `image_augmentation_script.py`
-- **功能**: 針對 PASCAL VOC 格式的簡易擴增工具，支援水平翻轉、亮度對比、色調飽和度調整等。
+- **功能**: 支援 PASCAL VOC、YOLO 與 CVAT 標註同步擴增，也可使用保守的純影像擴增管道。`--image_only` 預設不旋轉，需以 `--image_only_rotate [MAX_ANGLE]` 明確開啟。
 - **使用範例**:
   ```bash
   python image_augmentation_script.py -i ./dataset -o ./augmented_dataset -a horizontal_flip mixed
+
+  # 純影像輕量擴增（不旋轉）
+  python image_augmentation_script.py -i ./images -o ./augmented --image_only -n 3
+
+  # 純影像輕量擴增，另外啟用 ±10° 旋轉
+  python image_augmentation_script.py -i ./images -o ./augmented --image_only --image_only_rotate 10 -n 3
   ```
 
 ### 專用與輔助工具 (Specialized & Utility Tools)

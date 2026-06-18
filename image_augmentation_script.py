@@ -20,8 +20,11 @@
   # 旋轉擴增（固定步長，每隔 45° 產生一個版本）
   python image_augmentation_script.py -i ./images -l ./labels -o ./augmented -a rotation --rotate_step 45
 
-  # 純影像擴增（無標註）
+  # 純影像擴增（無標註，預設不旋轉）
   python image_augmentation_script.py -i ./images -o ./augmented --image_only -n 3
+
+  # 純影像擴增並加入保守的隨機旋轉（預設 ±5°，此處自訂為 ±10°）
+  python image_augmentation_script.py -i ./images -o ./augmented --image_only --image_only_rotate 10 -n 3
 """
 
 import os
@@ -243,28 +246,55 @@ _ROTATION_BASE_TRANSFORMS = [
     A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=0.3),
 ]
 
-# 純影像擴增管道（無標註，不需要 bbox_params）
-IMAGE_ONLY_PIPELINE = A.Compose([
-    A.SafeRotate(limit=45, p=0.6, border_mode=cv2.BORDER_CONSTANT),
-    A.Perspective(scale=(0.02, 0.08), p=0.4),
-    A.OneOf([
-        A.MotionBlur(blur_limit=7, p=1.0),
-        A.MedianBlur(blur_limit=5, p=1.0),
-        A.GaussianBlur(blur_limit=5, p=1.0),
-    ], p=0.3),
-    A.OneOf([
-        A.GaussNoise(std_range=(0.05, 0.15), mean_range=(0.0, 0.0),
-                     per_channel=True, noise_scale_factor=1.0, p=1.0),
-        A.ISONoise(color_shift=(0.01, 0.05), intensity=(0.1, 0.5), p=1.0),
-    ], p=0.2),
-    A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8), p=0.5),
-    A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=0.5),
-    A.HueSaturationValue(hue_shift_limit=30, sat_shift_limit=30, val_shift_limit=20, p=0.4),
-    A.CoarseDropout(num_holes_range=(2, 6),
-                    hole_height_range=(0.025, 0.075),
-                    hole_width_range=(0.025, 0.075),
-                    fill='random_uniform', p=0.3),
-])
+def build_image_only_pipeline(rotate_limit: Optional[int] = None) -> A.Compose:
+    """建立保守的純影像擴增管道。
+
+    預設只做輕微的光照、色彩、模糊、雜訊與壓縮變化；旋轉只會在
+    rotate_limit 有值時加入，避免未明確指定就改變影像幾何。
+    """
+    transforms = []
+    if rotate_limit is not None:
+        transforms.append(
+            A.SafeRotate(
+                limit=rotate_limit,
+                p=1.0,
+                border_mode=cv2.BORDER_REFLECT_101,
+            )
+        )
+
+    transforms.extend([
+        A.RandomBrightnessContrast(
+            brightness_limit=0.08,
+            contrast_limit=0.08,
+            p=0.6,
+        ),
+        A.HueSaturationValue(
+            hue_shift_limit=5,
+            sat_shift_limit=8,
+            val_shift_limit=8,
+            p=0.3,
+        ),
+        A.OneOf([
+            A.MotionBlur(blur_limit=3, p=1.0),
+            A.GaussianBlur(blur_limit=(3, 3), p=1.0),
+            A.ImageCompression(quality_range=(90, 100), p=1.0),
+        ], p=0.2),
+        A.OneOf([
+            A.GaussNoise(
+                std_range=(0.01, 0.03),
+                mean_range=(0.0, 0.0),
+                per_channel=True,
+                noise_scale_factor=1.0,
+                p=1.0,
+            ),
+            A.ISONoise(
+                color_shift=(0.01, 0.02),
+                intensity=(0.05, 0.15),
+                p=1.0,
+            ),
+        ], p=0.1),
+    ])
+    return A.Compose(transforms)
 
 
 def build_pipeline(transforms_list: list, ann_format: str,
@@ -310,7 +340,8 @@ def build_rotation_transforms(rotate_limit: Optional[int],
 # 純影像擴增模式
 # ══════════════════════════════════════════════════════════════
 
-def run_image_only(images_dir: Path, output_dir: Path, num_augmentations: int):
+def run_image_only(images_dir: Path, output_dir: Path, num_augmentations: int,
+                   rotate_limit: Optional[int] = None):
     """純影像擴增（無標註），對應原 augment_image_only.py 的功能"""
     output_dir.mkdir(parents=True, exist_ok=True)
     valid_ext = {'.jpg', '.jpeg', '.png', '.bmp'}
@@ -320,6 +351,7 @@ def run_image_only(images_dir: Path, output_dir: Path, num_augmentations: int):
         print(f'[提示] 在 {images_dir} 中找不到影像檔案。')
         return
 
+    pipeline = build_image_only_pipeline(rotate_limit)
     print(f'找到 {len(img_files)} 張影像，開始純影像擴增...')
     for img_path in tqdm(img_files):
         image_bgr = cv2.imread(str(img_path))
@@ -330,7 +362,7 @@ def run_image_only(images_dir: Path, output_dir: Path, num_augmentations: int):
         for i in range(num_augmentations):
             prefix = f'aug_{i + 1}_' if num_augmentations > 1 else 'aug_'
             try:
-                transformed = IMAGE_ONLY_PIPELINE(image=image_rgb)
+                transformed = pipeline(image=image_rgb)
                 aug_rgb = transformed['image']
             except Exception as e:
                 print(f'[錯誤] 處理 {img_path.name} 第 {i + 1} 次時發生例外：{e}')
@@ -511,6 +543,9 @@ def main():
 
   # 純影像擴增
   python image_augmentation_script.py -i ./images -o ./out --image_only -n 3
+
+  # 純影像擴增 + 隨機旋轉（不給角度時預設 ±5°）
+  python image_augmentation_script.py -i ./images -o ./out --image_only --image_only_rotate 10 -n 3
         """,
     )
 
@@ -532,6 +567,9 @@ def main():
                         help='[rotation] 固定旋轉步長（度），例如 45 會產生 0°/45°/90°/... 版本')
     parser.add_argument('--image_only', action='store_true',
                         help='純影像擴增模式（不處理標籤，使用專用管道）')
+    parser.add_argument('--image_only_rotate', type=int, nargs='?', const=5, default=None,
+                        metavar='MAX_ANGLE',
+                        help='[image_only] 啟用隨機旋轉；預設 ±5°，也可指定最大角度')
     parser.add_argument('--seed', type=int, default=42,
                         help='隨機種子（預設：42）')
 
@@ -548,6 +586,10 @@ def main():
     if not images_dir.exists():
         print(f'錯誤：輸入影像資料夾 "{images_dir}" 不存在')
         return
+    if args.image_only_rotate is not None and args.image_only_rotate <= 0:
+        parser.error('--image_only_rotate 的角度必須大於 0')
+    if args.image_only_rotate is not None and not args.image_only:
+        parser.error('--image_only_rotate 只能與 --image_only 一起使用')
 
     print('=' * 60)
     print('影像擴增腳本')
@@ -559,12 +601,23 @@ def main():
     print(f'模式    ：{"純影像擴增" if args.image_only else "標註同步擴增"}')
     if not args.image_only:
         print(f'擴增類型：{", ".join(args.augmentations)}')
+    else:
+        rotation_status = (
+            f'開啟（±{args.image_only_rotate}°）'
+            if args.image_only_rotate is not None else '關閉'
+        )
+        print(f'旋轉    ：{rotation_status}')
     print(f'擴增倍數：{args.num_augmentations}')
     print(f'隨機種子：{args.seed}')
     print('=' * 60)
 
     if args.image_only:
-        run_image_only(images_dir, output_dir, args.num_augmentations)
+        run_image_only(
+            images_dir,
+            output_dir,
+            args.num_augmentations,
+            rotate_limit=args.image_only_rotate,
+        )
     else:
         if not labels_dir.exists():
             print(f'錯誤：標籤資料夾 "{labels_dir}" 不存在')
