@@ -26,14 +26,13 @@
   # 純影像擴增並加入保守的隨機旋轉（預設 ±5°，此處自訂為 ±10°）
   python image_augmentation_script.py -i ./images -o ./augmented --image_only --image_only_rotate 10 -n 3
 
-  # 純影像擴增：將每個第一層子資料夾補到 200 張（包含原圖）
-  python image_augmentation_script.py -i ./class_images -o ./balanced --image_only --target_per_folder 200
+  # 純影像擴增：每個第一層子資料夾產生 200 張擴增影像（輸出不含原圖）
+  python image_augmentation_script.py -i ./class_images -o ./balanced --image_only --augment_per_folder 200
 """
 
 import os
 import argparse
 import random
-import shutil
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable, Tuple
@@ -407,13 +406,13 @@ def run_image_only(images_dir: Path, output_dir: Path, num_augmentations: int,
     print(f'純影像擴增完成！輸出目錄：{output_dir}')
 
 
-def run_image_only_target_per_folder(
+def run_image_only_augment_per_folder(
     images_dir: Path,
     output_dir: Path,
-    target_per_folder: int,
+    augment_per_folder: int,
     rotate_limit: Optional[int] = None,
 ):
-    """將每個第一層子資料夾補到固定影像總數（包含原圖）。"""
+    """每個第一層子資料夾產生固定數量的擴增影像，輸出不複製原圖。"""
     output_dir.mkdir(parents=True, exist_ok=True)
     pipeline = build_image_only_pipeline(rotate_limit)
 
@@ -430,11 +429,10 @@ def run_image_only_target_per_folder(
         print(f'[提示] 在 {images_dir} 中找不到子資料夾。')
         return
 
-    total_copied = 0
     total_augmented = 0
     print(
-        f'找到 {len(subdirs)} 個子資料夾，開始補齊到每資料夾 '
-        f'{target_per_folder} 張影像（包含原圖）...'
+        f'找到 {len(subdirs)} 個子資料夾，開始對每資料夾產生 '
+        f'{augment_per_folder} 張擴增影像（輸出不含原圖）...'
     )
 
     for subdir in subdirs:
@@ -453,30 +451,11 @@ def run_image_only_target_per_folder(
                 f'{len(existing_outputs)} 張影像；腳本不會自動刪除舊檔。'
             )
 
-        originals_to_copy = img_files[:target_per_folder]
-        for img_path in originals_to_copy:
-            target_path = folder_output_dir / img_path.name
-            if img_path.resolve() != target_path.resolve():
-                shutil.copy2(img_path, target_path)
-            total_copied += 1
-
         source_count = len(img_files)
-        if source_count >= target_per_folder:
-            if source_count > target_per_folder:
-                tqdm.write(
-                    f'[提示] {subdir.name} 原始影像有 {source_count} 張，'
-                    f'超過目標 {target_per_folder} 張；輸出僅保留排序後前 '
-                    f'{target_per_folder} 張。'
-                )
-            output_count = len(list_image_files(folder_output_dir))
-            tqdm.write(f'{subdir.name}: 已達目標，輸出目前 {output_count} 張。')
-            continue
-
-        augment_needed = target_per_folder - source_count
         folder_augmented = 0
         for i in tqdm(
-            range(augment_needed),
-            desc=f'{subdir.name} 補齊',
+            range(augment_per_folder),
+            desc=f'{subdir.name} 擴增',
             leave=False,
         ):
             src_img = img_files[i % source_count]
@@ -485,7 +464,7 @@ def run_image_only_target_per_folder(
                 src_img,
                 pipeline,
                 folder_output_dir / out_name,
-                f'補齊第 {i + 1} 張',
+                f'擴增第 {i + 1} 張',
             )
             if ok:
                 total_augmented += 1
@@ -493,11 +472,11 @@ def run_image_only_target_per_folder(
 
         output_count = len(list_image_files(folder_output_dir))
         tqdm.write(
-            f'{subdir.name}: 原圖 {source_count} 張，新增擴增 '
+            f'{subdir.name}: 來源原圖 {source_count} 張，新增擴增 '
             f'{folder_augmented} 張，輸出目前 {output_count} 張。'
         )
 
-    print(f'子資料夾補齊完成！複製原圖 {total_copied} 張，新增擴增 {total_augmented} 張。')
+    print(f'子資料夾擴增完成！新增擴增 {total_augmented} 張，未複製原圖。')
     print(f'輸出目錄：{output_dir}')
 
 
@@ -672,8 +651,8 @@ def main():
   # 純影像擴增 + 隨機旋轉（不給角度時預設 ±5°）
   python image_augmentation_script.py -i ./images -o ./out --image_only --image_only_rotate 10 -n 3
 
-  # 純影像擴增：將每個第一層子資料夾補到 200 張（包含原圖）
-  python image_augmentation_script.py -i ./class_images -o ./balanced --image_only --target_per_folder 200
+  # 純影像擴增：每個第一層子資料夾產生 200 張擴增影像（輸出不含原圖）
+  python image_augmentation_script.py -i ./class_images -o ./balanced --image_only --augment_per_folder 200
         """,
     )
 
@@ -698,9 +677,10 @@ def main():
     parser.add_argument('--image_only_rotate', type=int, nargs='?', const=5, default=None,
                         metavar='MAX_ANGLE',
                         help='[image_only] 啟用隨機旋轉；預設 ±5°，也可指定最大角度')
-    parser.add_argument('--target_per_folder', type=int, default=None,
+    parser.add_argument('--augment_per_folder', '--target_per_folder',
+                        dest='augment_per_folder', type=int, default=None,
                         metavar='COUNT',
-                        help='[image_only] 將輸入資料夾第一層每個子資料夾補到 COUNT 張影像（包含原圖）')
+                        help='[image_only] 對輸入資料夾第一層每個子資料夾產生 COUNT 張擴增影像（輸出不含原圖；--target_per_folder 為舊別名）')
     parser.add_argument('--seed', type=int, default=42,
                         help='隨機種子（預設：42）')
 
@@ -721,10 +701,10 @@ def main():
         parser.error('--image_only_rotate 的角度必須大於 0')
     if args.image_only_rotate is not None and not args.image_only:
         parser.error('--image_only_rotate 只能與 --image_only 一起使用')
-    if args.target_per_folder is not None and args.target_per_folder <= 0:
-        parser.error('--target_per_folder 的數量必須大於 0')
-    if args.target_per_folder is not None and not args.image_only:
-        parser.error('--target_per_folder 只能與 --image_only 一起使用')
+    if args.augment_per_folder is not None and args.augment_per_folder <= 0:
+        parser.error('--augment_per_folder 的數量必須大於 0')
+    if args.augment_per_folder is not None and not args.image_only:
+        parser.error('--augment_per_folder 只能與 --image_only 一起使用')
 
     print('=' * 60)
     print('影像擴增腳本')
@@ -742,8 +722,8 @@ def main():
             if args.image_only_rotate is not None else '關閉'
         )
         print(f'旋轉    ：{rotation_status}')
-        if args.target_per_folder is not None:
-            print(f'每資料夾目標：{args.target_per_folder} 張（包含原圖）')
+        if args.augment_per_folder is not None:
+            print(f'每資料夾擴增：{args.augment_per_folder} 張（輸出不含原圖）')
         else:
             print(f'擴增倍數：{args.num_augmentations}')
     if not args.image_only:
@@ -752,11 +732,11 @@ def main():
     print('=' * 60)
 
     if args.image_only:
-        if args.target_per_folder is not None:
-            run_image_only_target_per_folder(
+        if args.augment_per_folder is not None:
+            run_image_only_augment_per_folder(
                 images_dir,
                 output_dir,
-                args.target_per_folder,
+                args.augment_per_folder,
                 rotate_limit=args.image_only_rotate,
             )
         else:
