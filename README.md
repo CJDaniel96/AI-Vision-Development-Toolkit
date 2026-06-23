@@ -96,7 +96,7 @@
   ```
 
 `image_augmentation_script.py`
-- **功能**: 支援 PASCAL VOC、YOLO 與 CVAT 標註同步擴增，也可使用保守的純影像擴增管道。`--image_only` 預設不旋轉，需以 `--image_only_rotate [MAX_ANGLE]` 明確開啟。
+- **功能**: 支援 PASCAL VOC、YOLO 與 CVAT 標註同步擴增，也可使用保守的純影像擴增管道。`--image_only` 預設不旋轉，需以 `--image_only_rotate [MAX_ANGLE]` 明確開啟。分類資料夾可用 `--target_per_folder COUNT` 將每個第一層子資料夾補到固定總張數（包含原圖）。
 - **使用範例**:
   ```bash
   python image_augmentation_script.py -i ./dataset -o ./augmented_dataset -a horizontal_flip mixed
@@ -106,6 +106,9 @@
 
   # 純影像輕量擴增，另外啟用 ±10° 旋轉
   python image_augmentation_script.py -i ./images -o ./augmented --image_only --image_only_rotate 10 -n 3
+
+  # 分類資料夾補齊：./class_images/A、B、C 各自補到 200 張（包含原圖）
+  python image_augmentation_script.py -i ./class_images -o ./balanced --image_only --target_per_folder 200
   ```
 
 ### 專用與輔助工具 (Specialized & Utility Tools)
