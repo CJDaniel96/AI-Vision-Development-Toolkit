@@ -5,7 +5,7 @@
   - 支援 PASCAL VOC (.xml)、YOLO (.txt)、CVAT (.xml) 格式的標註同步擴增
   - 支援純影像擴增（無標註，--image_only）
   - 多種擴增管道：horizontal_flip, brightness_contrast, hue_saturation,
-                   mixed, smart_camera, hz_pde, rotation, image_only
+                   mixed, smart_camera, hz_pde, connector, rotation, image_only
 
 使用範例：
   # VOC 格式（影像與 XML 同一資料夾）
@@ -13,6 +13,9 @@
 
   # YOLO/多格式（影像與標籤分開）
   python image_augmentation_script.py -i ./images -l ./labels -o ./augmented -a mixed -n 5
+
+  # Connector 標註同步擴增（保留 pin row 幾何，不旋轉、不翻轉、不透視）
+  python image_augmentation_script.py -i ./images -l ./labels -o ./augmented -a connector -n 5
 
   # 旋轉擴增（隨機角度）
   python image_augmentation_script.py -i ./images -l ./labels -o ./augmented -a rotation --rotate_limit 40 -n 5
@@ -28,6 +31,9 @@
 
   # 純影像擴增：每個第一層子資料夾產生 200 張擴增影像（輸出不含原圖）
   python image_augmentation_script.py -i ./class_images -o ./balanced --image_only --augment_per_folder 200
+
+  # Connector 純影像擴增：保留 pin row 幾何，不旋轉、不翻轉、不透視
+  python image_augmentation_script.py -i ./connector_images -o ./connector_aug --image_only --image_only_profile connector --augment_per_folder 200
 """
 
 import os
@@ -179,6 +185,53 @@ def detect_and_load_annotations(
 # 擴增管道定義
 # ══════════════════════════════════════════════════════════════
 
+def build_connector_transforms() -> List[Any]:
+    """Connector 專用：只模擬拍攝條件變化，不改變 pin row 幾何。"""
+    return [
+        A.OneOf([
+            A.RandomBrightnessContrast(
+                brightness_limit=0.08,
+                contrast_limit=0.10,
+                p=1.0,
+            ),
+            A.RandomGamma(
+                gamma_limit=(90, 110),
+                p=1.0,
+            ),
+            A.CLAHE(
+                clip_limit=(1.0, 2.0),
+                tile_grid_size=(8, 8),
+                p=1.0,
+            ),
+        ], p=0.65),
+        A.HueSaturationValue(
+            hue_shift_limit=3,
+            sat_shift_limit=6,
+            val_shift_limit=6,
+            p=0.25,
+        ),
+        A.OneOf([
+            A.MotionBlur(blur_limit=3, p=1.0),
+            A.GaussianBlur(blur_limit=(3, 3), p=1.0),
+            A.ImageCompression(quality_range=(92, 100), p=1.0),
+        ], p=0.20),
+        A.OneOf([
+            A.GaussNoise(
+                std_range=(0.005, 0.02),
+                mean_range=(0.0, 0.0),
+                per_channel=True,
+                noise_scale_factor=1.0,
+                p=1.0,
+            ),
+            A.ISONoise(
+                color_shift=(0.005, 0.015),
+                intensity=(0.03, 0.10),
+                p=1.0,
+            ),
+        ], p=0.12),
+    ]
+
+
 # 各有標註管道的 transforms list（不含 bbox_params，執行時動態組合）
 ANNOTATED_PIPELINE_TRANSFORMS: Dict[str, list] = {
     'horizontal_flip': [
@@ -241,6 +294,7 @@ ANNOTATED_PIPELINE_TRANSFORMS: Dict[str, list] = {
                         hole_width_range=(0.03, 0.08),
                         fill=0, p=0.15),
     ],
+    'connector': build_connector_transforms(),
 }
 
 # 旋轉管道的基礎 transforms（rotation 管道專用）
@@ -251,12 +305,22 @@ _ROTATION_BASE_TRANSFORMS = [
     A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=0.3),
 ]
 
-def build_image_only_pipeline(rotate_limit: Optional[int] = None) -> A.Compose:
+def build_image_only_pipeline(
+    rotate_limit: Optional[int] = None,
+    profile: str = 'default',
+) -> A.Compose:
     """建立保守的純影像擴增管道。
 
     預設只做輕微的光照、色彩、模糊、雜訊與壓縮變化；旋轉只會在
     rotate_limit 有值時加入，避免未明確指定就改變影像幾何。
     """
+    if profile == 'connector':
+        if rotate_limit is not None:
+            raise ValueError('connector profile 不允許旋轉，請移除 --image_only_rotate')
+        return A.Compose(build_connector_transforms())
+    if profile != 'default':
+        raise ValueError(f'不支援的 image_only profile: {profile}')
+
     transforms = []
     if rotate_limit is not None:
         transforms.append(
@@ -380,8 +444,13 @@ def save_image_only_augmentation(
     return True
 
 
-def run_image_only(images_dir: Path, output_dir: Path, num_augmentations: int,
-                   rotate_limit: Optional[int] = None):
+def run_image_only(
+    images_dir: Path,
+    output_dir: Path,
+    num_augmentations: int,
+    rotate_limit: Optional[int] = None,
+    image_only_profile: str = 'default',
+):
     """純影像擴增（無標註），對應原 augment_image_only.py 的功能"""
     output_dir.mkdir(parents=True, exist_ok=True)
     img_files = list_image_files(images_dir)
@@ -390,7 +459,10 @@ def run_image_only(images_dir: Path, output_dir: Path, num_augmentations: int,
         print(f'[提示] 在 {images_dir} 中找不到影像檔案。')
         return
 
-    pipeline = build_image_only_pipeline(rotate_limit)
+    pipeline = build_image_only_pipeline(
+        rotate_limit=rotate_limit,
+        profile=image_only_profile,
+    )
     print(f'找到 {len(img_files)} 張影像，開始純影像擴增...')
     for img_path in tqdm(img_files):
         for i in range(num_augmentations):
@@ -411,10 +483,14 @@ def run_image_only_augment_per_folder(
     output_dir: Path,
     augment_per_folder: int,
     rotate_limit: Optional[int] = None,
+    image_only_profile: str = 'default',
 ):
     """每個第一層子資料夾產生固定數量的擴增影像，輸出不複製原圖。"""
     output_dir.mkdir(parents=True, exist_ok=True)
-    pipeline = build_image_only_pipeline(rotate_limit)
+    pipeline = build_image_only_pipeline(
+        rotate_limit=rotate_limit,
+        profile=image_only_profile,
+    )
 
     output_root = output_dir.resolve()
     subdirs = sorted(
@@ -632,6 +708,7 @@ def main():
   mixed               混合擴增
   smart_camera        Smart Camera 擴增（含 resize/pad/光照/模糊）
   hz_pde              HZ PDE 擴增（保守幾何 + 光照 + 模糊）
+  connector           Connector 擴增（保留 pin row 幾何，無旋轉/翻轉/透視）
   rotation            旋轉擴增（搭配 --rotate_limit 或 --rotate_step）
   image_only          純影像擴增管道（需加 --image_only 旗標）
 
@@ -653,6 +730,9 @@ def main():
 
   # 純影像擴增：每個第一層子資料夾產生 200 張擴增影像（輸出不含原圖）
   python image_augmentation_script.py -i ./class_images -o ./balanced --image_only --augment_per_folder 200
+
+  # Connector 純影像擴增（無旋轉、無翻轉、無透視）
+  python image_augmentation_script.py -i ./connector_images -o ./connector_aug --image_only --image_only_profile connector --augment_per_folder 200
         """,
     )
 
@@ -677,6 +757,9 @@ def main():
     parser.add_argument('--image_only_rotate', type=int, nargs='?', const=5, default=None,
                         metavar='MAX_ANGLE',
                         help='[image_only] 啟用隨機旋轉；預設 ±5°，也可指定最大角度')
+    parser.add_argument('--image_only_profile', choices=['default', 'connector'],
+                        default='default',
+                        help='[image_only] 純影像擴增 profile；connector 只做拍攝條件變化，不做旋轉/翻轉/透視')
     parser.add_argument('--augment_per_folder', '--target_per_folder',
                         dest='augment_per_folder', type=int, default=None,
                         metavar='COUNT',
@@ -701,6 +784,10 @@ def main():
         parser.error('--image_only_rotate 的角度必須大於 0')
     if args.image_only_rotate is not None and not args.image_only:
         parser.error('--image_only_rotate 只能與 --image_only 一起使用')
+    if args.image_only_profile != 'default' and not args.image_only:
+        parser.error('--image_only_profile 只能與 --image_only 一起使用')
+    if args.image_only_profile == 'connector' and args.image_only_rotate is not None:
+        parser.error('connector profile 不允許旋轉，請移除 --image_only_rotate')
     if args.augment_per_folder is not None and args.augment_per_folder <= 0:
         parser.error('--augment_per_folder 的數量必須大於 0')
     if args.augment_per_folder is not None and not args.image_only:
@@ -722,6 +809,7 @@ def main():
             if args.image_only_rotate is not None else '關閉'
         )
         print(f'旋轉    ：{rotation_status}')
+        print(f'純影像 profile：{args.image_only_profile}')
         if args.augment_per_folder is not None:
             print(f'每資料夾擴增：{args.augment_per_folder} 張（輸出不含原圖）')
         else:
@@ -738,6 +826,7 @@ def main():
                 output_dir,
                 args.augment_per_folder,
                 rotate_limit=args.image_only_rotate,
+                image_only_profile=args.image_only_profile,
             )
         else:
             run_image_only(
@@ -745,6 +834,7 @@ def main():
                 output_dir,
                 args.num_augmentations,
                 rotate_limit=args.image_only_rotate,
+                image_only_profile=args.image_only_profile,
             )
     else:
         if not labels_dir.exists():
