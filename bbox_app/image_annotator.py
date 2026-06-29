@@ -1,4 +1,6 @@
 import sys
+from math import ceil, floor
+from pathlib import Path
 from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QAction, QFileDialog, QInputDialog
 from PyQt5.QtGui import QPixmap, QPainter, QPen, QGuiApplication, QKeySequence, QCursor, QBrush, QColor
 from PyQt5.QtCore import Qt, QPoint, QRect, pyqtSignal
@@ -321,6 +323,35 @@ class ImageLabel(QLabel):
         else:
             print("從座標建立的矩形無效 (寬或高為0)。")
 
+    def get_selected_rect_original_crop_rect(self):
+        """取得目前選取框在原始圖片上的裁切 QRect。"""
+        if self.selected_rect_index is None or not (0 <= self.selected_rect_index < len(self.rect_list)):
+            return None
+
+        if not self.original_pixmap_size or not self.scaled_pixmap_size or self.scaled_pixmap_size.width() == 0 or self.scaled_pixmap_size.height() == 0:
+            return None
+
+        rect = self.rect_list[self.selected_rect_index].normalized()
+        original_width = self.original_pixmap_size.width()
+        original_height = self.original_pixmap_size.height()
+        scale_x = original_width / self.scaled_pixmap_size.width()
+        scale_y = original_height / self.scaled_pixmap_size.height()
+
+        x1 = floor(rect.left() * scale_x)
+        y1 = floor(rect.top() * scale_y)
+        x2 = ceil((rect.right() + 1) * scale_x)
+        y2 = ceil((rect.bottom() + 1) * scale_y)
+
+        x1 = max(0, min(x1, original_width))
+        y1 = max(0, min(y1, original_height))
+        x2 = max(0, min(x2, original_width))
+        y2 = max(0, min(y2, original_height))
+
+        if x2 <= x1 or y2 <= y1:
+            return None
+
+        return QRect(x1, y1, x2 - x1, y2 - y1)
+
 class MainWindow(QMainWindow):
     """
     主視窗應用程式。
@@ -366,6 +397,12 @@ class MainWindow(QMainWindow):
         save_action = QAction("儲存標註", self)
         save_action.triggered.connect(self.save_annotations)
         file_menu.addAction(save_action)
+
+        # 裁切目前選取的標註框並另存成圖片
+        crop_action = QAction("裁切選取框另存圖片", self)
+        crop_action.setShortcut("Ctrl+Shift+C")
+        crop_action.triggered.connect(self.save_selected_crop)
+        file_menu.addAction(crop_action)
 
         # 建立編輯選單和復原動作
         edit_menu = menu_bar.addMenu("編輯")
@@ -487,6 +524,59 @@ class MainWindow(QMainWindow):
                 print(f"標註已成功儲存至: {file_path}")
             except Exception as e:
                 print(f"儲存檔案時發生錯誤: {e}")
+
+    def save_selected_crop(self):
+        """將目前選取的標註框從原始圖片裁切後另存成影像檔。"""
+        if not self.image_path:
+            self.statusBar().showMessage("請先載入圖片再裁切。")
+            return
+
+        crop_rect = self.image_label.get_selected_rect_original_crop_rect()
+        if crop_rect is None:
+            self.statusBar().showMessage("請先選取一個有效的標註框再裁切。")
+            return
+
+        original_pixmap = QPixmap(self.image_path)
+        if original_pixmap.isNull():
+            self.statusBar().showMessage("無法載入原始圖片，裁切失敗。")
+            return
+
+        crop_pixmap = original_pixmap.copy(crop_rect)
+        if crop_pixmap.isNull():
+            self.statusBar().showMessage("裁切區域無效，無法儲存圖片。")
+            return
+
+        source_path = Path(self.image_path)
+        rect_index = self.image_label.selected_rect_index + 1
+        default_path = source_path.with_name(f"{source_path.stem}_crop_{rect_index}.png")
+        options = QFileDialog.Options()
+        file_path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "儲存裁切圖片",
+            str(default_path),
+            "PNG 圖片 (*.png);;JPEG 圖片 (*.jpg *.jpeg);;BMP 圖片 (*.bmp)",
+            options=options
+        )
+
+        if not file_path:
+            return
+
+        output_path = Path(file_path)
+        if not output_path.suffix:
+            if "JPEG" in selected_filter:
+                output_path = output_path.with_suffix(".jpg")
+            elif "BMP" in selected_filter:
+                output_path = output_path.with_suffix(".bmp")
+            else:
+                output_path = output_path.with_suffix(".png")
+
+        if crop_pixmap.save(str(output_path)):
+            self.status_message = f"已儲存裁切圖片: {output_path}"
+            self.statusBar().showMessage(self.status_message)
+            print(f"裁切圖片已成功儲存至: {output_path}")
+        else:
+            self.statusBar().showMessage("儲存裁切圖片時發生錯誤。")
+            print(f"儲存裁切圖片時發生錯誤: {output_path}")
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
