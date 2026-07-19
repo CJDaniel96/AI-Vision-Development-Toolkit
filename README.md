@@ -59,6 +59,15 @@
 
 ### 資料集整備與分割 (Dataset Preparation & Splitting)
 
+`weighted_image_sampler.py`
+- **功能**: 統計來源資料夾中各第一層子資料夾的影像數量，依其占總資料量的比例計算加權抽樣數量，隨機抽取後複製到輸出資料夾。計算值小於 1 時至少抽 1 張，其餘採四捨五入；輸出會保留子資料夾結構。
+- **使用範例**:
+  ```bash
+  python weighted_image_sampler.py -i ./class_images -o ./sampled_images -n 100 --seed 42
+  ```
+
+> 各子資料夾會獨立套用「至少 1 張」與四捨五入規則，因此實際輸出總數可能與 `-n` 有些微差異，CLI 會列出完整配置與實際數量。
+
 `image_dataset_splitter.py` (推薦)
 - **功能**: 功能強大的資料集分割工具，可將影像和對應的標註檔（支援 .xml, .txt 等）按比例分割為訓練、驗證、測試集。支援傳統模式與 COCO-like (images/labels 分離) 模式。
 - **使用範例**:
