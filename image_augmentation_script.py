@@ -29,6 +29,9 @@
   # 純影像擴增並加入保守的隨機旋轉（預設 ±5°，此處自訂為 ±10°）
   python image_augmentation_script.py -i ./images -o ./augmented --image_only --image_only_rotate 10 -n 3
 
+  # 整批資料總共產生 100 張擴增影像（不是每張原圖各 100 張）
+  python image_augmentation_script.py -i ./images -o ./augmented --image_only --total_count 100
+
   # 純影像擴增：每個第一層子資料夾產生 200 張擴增影像（輸出不含原圖）
   python image_augmentation_script.py -i ./class_images -o ./balanced --image_only --augment_per_folder 200
 
@@ -478,6 +481,62 @@ def run_image_only(
     print(f'純影像擴增完成！輸出目錄：{output_dir}')
 
 
+def run_image_only_total_count(
+    images_dir: Path,
+    output_dir: Path,
+    total_count: int,
+    rotate_limit: Optional[int] = None,
+    image_only_profile: str = 'default',
+) -> int:
+    """輪流取用來源影像，整批產生指定數量的純影像擴增結果。"""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    img_files = list_image_files(images_dir)
+
+    if not img_files:
+        print(f'[提示] 在 {images_dir} 中找不到影像檔案。')
+        return 0
+
+    pipeline = build_image_only_pipeline(
+        rotate_limit=rotate_limit,
+        profile=image_only_profile,
+    )
+    print(
+        f'找到 {len(img_files)} 張影像，開始產生指定總數 '
+        f'{total_count} 張擴增影像...'
+    )
+
+    success_count = 0
+    attempt_count = 0
+    # 允許略過損壞影像或偶發的擴增錯誤，同時避免所有來源都無法處理時無限迴圈。
+    max_attempts = max(total_count * max(2, len(img_files)), len(img_files))
+    with tqdm(total=total_count, desc='整批擴增') as progress:
+        while success_count < total_count and attempt_count < max_attempts:
+            img_path = img_files[attempt_count % len(img_files)]
+            output_index = success_count + 1
+            out_name = f'aug_{output_index:05d}_{img_path.name}'
+            attempt_count += 1
+
+            ok = save_image_only_augmentation(
+                img_path,
+                pipeline,
+                output_dir / out_name,
+                f'總數模式第 {output_index} 張',
+            )
+            if ok:
+                success_count += 1
+                progress.update(1)
+
+    if success_count < total_count:
+        print(
+            f'[警告] 指定產生 {total_count} 張，但只有 {success_count} 張成功；'
+            '請檢查無法讀取的來源影像或上方錯誤訊息。'
+        )
+    else:
+        print(f'純影像擴增完成！已產生指定的 {success_count} 張影像。')
+    print(f'輸出目錄：{output_dir}')
+    return success_count
+
+
 def run_image_only_augment_per_folder(
     images_dir: Path,
     output_dir: Path,
@@ -609,6 +668,7 @@ def run_annotated_augmentation(
     num_augmentations: int,
     rotate_limit: Optional[int],
     rotate_step: Optional[int],
+    total_count: Optional[int] = None,
 ):
     """標註同步擴增，支援 VOC / YOLO / CVAT 自動偵測"""
     output_images_dir = output_dir / 'images'
@@ -629,6 +689,77 @@ def run_annotated_augmentation(
     is_fixed_step = False
     if 'rotation' in augmentation_types:
         rotation_transforms, is_fixed_step = build_rotation_transforms(rotate_limit, rotate_step)
+
+    if total_count is not None:
+        annotated_sources = []
+        for image_path in image_files:
+            annotation = detect_and_load_annotations(image_path, labels_dir)
+            if annotation[0] is None:
+                tqdm.write(f'警告：找不到 {image_path.name} 的標籤檔，跳過。')
+                continue
+            annotated_sources.append((image_path, *annotation))
+
+        if not annotated_sources:
+            print('[提示] 找不到任何可用的影像/標籤組合，未產生擴增結果。')
+            return
+
+        success_count = 0
+        attempt_count = 0
+        rotation_attempt_count = 0
+        candidate_count = len(annotated_sources) * len(augmentation_types)
+        max_attempts = max(total_count * 10, candidate_count)
+        print(
+            f'找到 {len(annotated_sources)} 組可用影像/標籤，'
+            f'將整批產生指定總數 {total_count} 組擴增結果...'
+        )
+
+        with tqdm(total=total_count, desc='整批標註擴增') as progress:
+            while success_count < total_count and attempt_count < max_attempts:
+                source_index = (attempt_count // len(augmentation_types)) % len(annotated_sources)
+                aug_type = augmentation_types[attempt_count % len(augmentation_types)]
+                image_path, bboxes, class_labels, ann_format, save_func, ann_ext = \
+                    annotated_sources[source_index]
+                attempt_count += 1
+
+                if aug_type == 'rotation':
+                    if rotation_transforms is None:
+                        continue
+                    if is_fixed_step:
+                        angle = (rotation_attempt_count * rotate_step) % 360
+                        transforms_list = [
+                            A.Rotate(
+                                limit=(angle, angle),
+                                p=1.0,
+                                border_mode=cv2.BORDER_CONSTANT,
+                                fill_value=0,
+                            )
+                        ] + rotation_transforms
+                    else:
+                        transforms_list = rotation_transforms
+                    rotation_attempt_count += 1
+                else:
+                    transforms_list = ANNOTATED_PIPELINE_TRANSFORMS[aug_type]
+
+                suffix = f'{aug_type}_total_{success_count + 1:05d}'
+                ok = augment_single(
+                    image_path, bboxes, class_labels, ann_format,
+                    save_func, ann_ext, aug_type, transforms_list,
+                    output_images_dir, output_labels_dir, suffix,
+                )
+                if ok:
+                    success_count += 1
+                    progress.update(1)
+
+        if success_count < total_count:
+            print(
+                f'\n[警告] 指定產生 {total_count} 組，但只有 {success_count} 組成功；'
+                '部分影像可能缺少有效標註，或擴增後所有物件皆超出範圍。'
+            )
+        else:
+            print(f'\n擴增完成！已產生指定的 {success_count} 組影像/標籤')
+        print(f'  影像輸出：{output_images_dir}')
+        print(f'  標籤輸出：{output_labels_dir}')
+        return
 
     success_count = 0
     for image_path in tqdm(image_files):
@@ -654,11 +785,13 @@ def run_annotated_augmentation(
                                      border_mode=cv2.BORDER_CONSTANT, fill_value=0)
                         ] + rotation_transforms
                         suffix = f'rot{angle}'
-                        augment_single(
+                        ok = augment_single(
                             image_path, bboxes, class_labels, ann_format,
                             save_func, ann_ext, aug_type, step_transforms,
                             output_images_dir, output_labels_dir, suffix,
                         )
+                        if ok:
+                            success_count += 1
                 else:
                     for i in range(num_augmentations):
                         suffix = f'rotation_{i + 1}' if num_augmentations > 1 else 'rotation'
@@ -728,6 +861,9 @@ def main():
   # 純影像擴增 + 隨機旋轉（不給角度時預設 ±5°）
   python image_augmentation_script.py -i ./images -o ./out --image_only --image_only_rotate 10 -n 3
 
+  # 指定整批總擴增數量（總共 100 張，不是每張原圖各 100 張）
+  python image_augmentation_script.py -i ./images -o ./out --image_only --total_count 100
+
   # 純影像擴增：每個第一層子資料夾產生 200 張擴增影像（輸出不含原圖）
   python image_augmentation_script.py -i ./class_images -o ./balanced --image_only --augment_per_folder 200
 
@@ -746,8 +882,13 @@ def main():
                         choices=ALL_ANNOTATED_TYPES,
                         default=['mixed'],
                         help='要執行的擴增類型（可指定多個）')
-    parser.add_argument('-n', '--num_augmentations', type=int, default=1,
-                        help='每種擴增類型要產生的版本數量（預設：1）')
+    count_group = parser.add_mutually_exclusive_group()
+    count_group.add_argument('-n', '--num_augmentations', type=int, default=None,
+                             help='每張原圖、每種擴增類型要產生的版本數量（預設：1）')
+    count_group.add_argument('--total_count', '--total_augmentations',
+                             dest='total_count', type=int, default=None,
+                             metavar='COUNT',
+                             help='整批資料要產生的擴增結果總數；會輪流取用來源影像與擴增類型')
     parser.add_argument('--rotate_limit', type=int, default=None,
                         help='[rotation] 隨機旋轉最大角度，例如 40 表示 ±40°')
     parser.add_argument('--rotate_step', type=int, default=None,
@@ -768,6 +909,9 @@ def main():
                         help='隨機種子（預設：42）')
 
     args = parser.parse_args()
+    num_augmentations = (
+        args.num_augmentations if args.num_augmentations is not None else 1
+    )
 
     # 設定隨機種子
     random.seed(args.seed)
@@ -788,10 +932,18 @@ def main():
         parser.error('--image_only_profile 只能與 --image_only 一起使用')
     if args.image_only_profile == 'connector' and args.image_only_rotate is not None:
         parser.error('connector profile 不允許旋轉，請移除 --image_only_rotate')
+    if num_augmentations <= 0:
+        parser.error('--num_augmentations 的數量必須大於 0')
+    if args.total_count is not None and args.total_count <= 0:
+        parser.error('--total_count 的數量必須大於 0')
     if args.augment_per_folder is not None and args.augment_per_folder <= 0:
         parser.error('--augment_per_folder 的數量必須大於 0')
     if args.augment_per_folder is not None and not args.image_only:
         parser.error('--augment_per_folder 只能與 --image_only 一起使用')
+    if args.augment_per_folder is not None and args.total_count is not None:
+        parser.error('--augment_per_folder 不能與 --total_count 同時使用')
+    if args.augment_per_folder is not None and args.num_augmentations is not None:
+        parser.error('--augment_per_folder 不能與 --num_augmentations 同時使用')
 
     print('=' * 60)
     print('影像擴增腳本')
@@ -812,10 +964,15 @@ def main():
         print(f'純影像 profile：{args.image_only_profile}')
         if args.augment_per_folder is not None:
             print(f'每資料夾擴增：{args.augment_per_folder} 張（輸出不含原圖）')
+        elif args.total_count is not None:
+            print(f'整批擴增總數：{args.total_count} 張（輸出不含原圖）')
         else:
-            print(f'擴增倍數：{args.num_augmentations}')
+            print(f'擴增倍數：{num_augmentations}')
     if not args.image_only:
-        print(f'擴增倍數：{args.num_augmentations}')
+        if args.total_count is not None:
+            print(f'整批擴增總數：{args.total_count} 組')
+        else:
+            print(f'擴增倍數：{num_augmentations}')
     print(f'隨機種子：{args.seed}')
     print('=' * 60)
 
@@ -828,11 +985,19 @@ def main():
                 rotate_limit=args.image_only_rotate,
                 image_only_profile=args.image_only_profile,
             )
+        elif args.total_count is not None:
+            run_image_only_total_count(
+                images_dir,
+                output_dir,
+                args.total_count,
+                rotate_limit=args.image_only_rotate,
+                image_only_profile=args.image_only_profile,
+            )
         else:
             run_image_only(
                 images_dir,
                 output_dir,
-                args.num_augmentations,
+                num_augmentations,
                 rotate_limit=args.image_only_rotate,
                 image_only_profile=args.image_only_profile,
             )
@@ -845,9 +1010,10 @@ def main():
             labels_dir=labels_dir,
             output_dir=output_dir,
             augmentation_types=args.augmentations,
-            num_augmentations=args.num_augmentations,
+            num_augmentations=num_augmentations,
             rotate_limit=args.rotate_limit,
             rotate_step=args.rotate_step,
+            total_count=args.total_count,
         )
 
     print('=' * 60)

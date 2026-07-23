@@ -105,7 +105,7 @@
   ```
 
 `image_augmentation_script.py`
-- **功能**: 支援 PASCAL VOC、YOLO 與 CVAT 標註同步擴增，也可使用保守的純影像擴增管道。`--image_only` 預設不旋轉，需以 `--image_only_rotate [MAX_ANGLE]` 明確開啟。分類資料夾可用 `--augment_per_folder COUNT` 讓每個第一層子資料夾產生固定張數的擴增影像，輸出不保留原圖。Connector 可用 `connector` profile，只模擬拍攝條件變化，不做旋轉、翻轉、透視或剪切，適合 pin row 位移與插錯 pin 檢測。
+- **功能**: 支援 PASCAL VOC、YOLO 與 CVAT 標註同步擴增，也可使用保守的純影像擴增管道。`-n` 指定每張原圖的擴增版本數，`--total_count COUNT` 則直接指定整批要產生的擴增總數。`--image_only` 預設不旋轉，需以 `--image_only_rotate [MAX_ANGLE]` 明確開啟。分類資料夾可用 `--augment_per_folder COUNT` 讓每個第一層子資料夾產生固定張數的擴增影像，輸出不保留原圖。Connector 可用 `connector` profile，只模擬拍攝條件變化，不做旋轉、翻轉、透視或剪切，適合 pin row 位移與插錯 pin 檢測。
 - **使用範例**:
   ```bash
   python image_augmentation_script.py -i ./dataset -o ./augmented_dataset -a horizontal_flip mixed
@@ -115,6 +115,12 @@
 
   # 純影像輕量擴增，另外啟用 ±10° 旋轉
   python image_augmentation_script.py -i ./images -o ./augmented --image_only --image_only_rotate 10 -n 3
+
+  # 整批總共產生 100 張擴增影像
+  python image_augmentation_script.py -i ./images -o ./augmented --image_only --total_count 100
+
+  # 含標註資料整批總共產生 100 組影像/標籤
+  python image_augmentation_script.py -i ./images -l ./labels -o ./augmented -a mixed --total_count 100
 
   # 分類資料夾擴增：./class_images/A、B、C 各自產生 200 張擴增影像（輸出不含原圖）
   python image_augmentation_script.py -i ./class_images -o ./balanced --image_only --augment_per_folder 200
