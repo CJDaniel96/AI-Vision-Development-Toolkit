@@ -301,6 +301,66 @@ ANNOTATED_PIPELINE_TRANSFORMS: Dict[str, list] = {
                         hole_width_range=(0.03, 0.08),
                         fill=0, p=0.15),
     ],
+    'hz_pde_traditional': [
+        # 先增加 5% 邊界，避免底座本來就太靠近影像邊緣
+        # 不要填黑色，否則可能和黑色墊片特徵混淆
+        A.CropAndPad(
+            percent=0.05,
+            keep_size=False,
+            border_mode=cv2.BORDER_CONSTANT,
+            fill=(114, 114, 114),
+            p=1.0,
+        ),
+ 
+        # 輕微旋轉與縮放；fit_output=True 會擴張畫布保留完整影像
+        A.Affine(
+            scale=(0.95, 1.05),
+            rotate=(-2, 2),
+            shear=(-1, 1),
+            fit_output=True,
+            keep_ratio=True,
+            border_mode=cv2.BORDER_CONSTANT,
+            fill=(114, 114, 114),
+            interpolation=cv2.INTER_LINEAR,
+            p=0.4,
+        ),
+ 
+        # 若設備左右方向在實際環境中都可能出現才開啟
+        A.HorizontalFlip(p=0.0),
+ 
+        # 光照變化：黑色墊片仍需保持可辨識
+        A.RandomBrightnessContrast(
+            brightness_limit=0.15,
+            contrast_limit=0.15,
+            p=0.4,
+        ),
+ 
+        A.HueSaturationValue(
+            hue_shift_limit=3,
+            sat_shift_limit=10,
+            val_shift_limit=10,
+            p=0.25,
+        ),
+ 
+        # 少量相機畫質變化，不要模糊過強
+        A.OneOf(
+            [
+                A.GaussianBlur(
+                    blur_limit=(3, 3),
+                    p=1.0,
+                ),
+                A.GaussNoise(
+                    std_range=(0.01, 0.03),
+                    p=1.0,
+                ),
+                A.ImageCompression(
+                    quality_range=(85, 100),
+                    p=1.0,
+                ),
+            ],
+            p=0.15,
+        ),
+    ],
     'connector': build_connector_transforms(),
 }
 
