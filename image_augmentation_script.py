@@ -462,9 +462,9 @@ def build_rotation_transforms(rotate_limit: Optional[int],
         print(f'啟用隨機角度旋轉，範圍: ±{rotate_limit}°')
         rotation = [
             A.Rotate(limit=rotate_limit, p=0.7,
-                     border_mode=cv2.BORDER_CONSTANT, fill_value=0),
+                     border_mode=cv2.BORDER_CONSTANT, fill=0),
             A.Affine(scale=(0.9, 1.1), translate_percent=0.1, p=0.5,
-                     border_mode=cv2.BORDER_CONSTANT, fill_value=0),
+                     border_mode=cv2.BORDER_CONSTANT, fill=0),
         ]
         return rotation + _ROTATION_BASE_TRANSFORMS, False
     else:
@@ -493,7 +493,7 @@ def make_transforms_resolver(
             angle = (state['rotation_index'] * rotate_step) % 360
             resolved = [
                 A.Rotate(limit=(angle, angle), p=1.0,
-                         border_mode=cv2.BORDER_CONSTANT, fill_value=0)
+                         border_mode=cv2.BORDER_CONSTANT, fill=0)
             ] + rotation_transforms
         else:
             resolved = rotation_transforms
@@ -1065,7 +1065,7 @@ def run_annotated_augmentation(
                         angle = step_idx * rotate_step
                         step_transforms = [
                             A.Rotate(limit=(angle, angle), p=1.0,
-                                     border_mode=cv2.BORDER_CONSTANT, fill_value=0)
+                                     border_mode=cv2.BORDER_CONSTANT, fill=0)
                         ] + rotation_transforms
                         suffix = f'rot{angle}'
                         saved_labels = augment_single(
