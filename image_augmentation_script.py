@@ -32,6 +32,9 @@
   # 整批資料總共產生 100 張擴增影像（不是每張原圖各 100 張）
   python image_augmentation_script.py -i ./images -o ./augmented --image_only --total_count 100
 
+  # 類別平衡：讓標註裡每個 label 在輸出中都累積到 100 個 bbox instance（輸出不含原圖）
+  python image_augmentation_script.py -i ./dataset -o ./balanced -a mixed --augment_per_class 100
+
   # 純影像擴增：每個第一層子資料夾產生 200 張擴增影像（輸出不含原圖）
   python image_augmentation_script.py -i ./class_images -o ./balanced --image_only --augment_per_folder 200
 
@@ -43,6 +46,7 @@ import os
 import argparse
 import random
 import xml.etree.ElementTree as ET
+from collections import Counter
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable, Tuple
 import cv2
@@ -408,6 +412,37 @@ def build_rotation_transforms(rotate_limit: Optional[int],
         return [A.RandomRotate90(p=0.75)] + _ROTATION_BASE_TRANSFORMS, False
 
 
+def make_transforms_resolver(
+    rotation_transforms: Optional[list],
+    is_fixed_step: bool,
+    rotate_step: Optional[int],
+) -> Callable[[str], Optional[list]]:
+    """
+    建立「擴增類型 → transforms list」的解析函式。
+    rotation 在固定步長模式下每被取用一次就前進一個角度；
+    無法解析的類型回傳 None，由呼叫端決定跳過。
+    """
+    state = {'rotation_index': 0}
+
+    def resolve(aug_type: str) -> Optional[list]:
+        if aug_type != 'rotation':
+            return ANNOTATED_PIPELINE_TRANSFORMS.get(aug_type)
+        if rotation_transforms is None:
+            return None
+        if is_fixed_step:
+            angle = (state['rotation_index'] * rotate_step) % 360
+            resolved = [
+                A.Rotate(limit=(angle, angle), p=1.0,
+                         border_mode=cv2.BORDER_CONSTANT, fill_value=0)
+            ] + rotation_transforms
+        else:
+            resolved = rotation_transforms
+        state['rotation_index'] += 1
+        return resolved
+
+    return resolve
+
+
 # ══════════════════════════════════════════════════════════════
 # 純影像擴增模式
 # ══════════════════════════════════════════════════════════════
@@ -623,14 +658,14 @@ def augment_single(image_path: Path, bboxes: list, class_labels: list,
                    ann_format: str, save_func: Callable, ann_ext: str,
                    pipeline_name: str, transforms_list: list,
                    output_images_dir: Path, output_labels_dir: Path,
-                   suffix: str) -> bool:
+                   suffix: str) -> Optional[list]:
     """
     對單張影像執行一次擴增並儲存結果。
-    回傳是否成功。
+    成功時回傳實際寫出的 class_labels（擴增後可能少於原始標註），失敗回傳 None。
     """
     image_bgr = cv2.imread(str(image_path))
     if image_bgr is None:
-        return False
+        return None
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
 
     transform = build_pipeline(transforms_list, ann_format)
@@ -638,12 +673,12 @@ def augment_single(image_path: Path, bboxes: list, class_labels: list,
         augmented = transform(image=image_rgb, bboxes=bboxes, class_labels=class_labels)
     except Exception as e:
         print(f'  錯誤：{image_path.name} ({pipeline_name}) 擴增失敗：{e}')
-        return False
+        return None
 
     aug_bboxes = augmented['bboxes']
     aug_labels = augmented['class_labels']
     if not aug_bboxes:
-        return False  # 物件全部超出邊界，跳過
+        return None  # 物件全部超出邊界，跳過
 
     aug_image = augmented['image']
     aug_h, aug_w = aug_image.shape[:2]
@@ -657,7 +692,196 @@ def augment_single(image_path: Path, bboxes: list, class_labels: list,
         aug_bboxes, aug_labels,
         filename=new_img_name, width=aug_w, height=aug_h, depth=3,
     )
-    return True
+    return list(aug_labels)
+
+
+def load_annotated_sources(image_files: List[Path], labels_dir: Path) -> list:
+    """載入所有可用的 (影像, 標註) 組合，缺標籤檔的影像會被跳過。"""
+    sources = []
+    for image_path in image_files:
+        annotation = detect_and_load_annotations(image_path, labels_dir)
+        if annotation[0] is None:
+            tqdm.write(f'警告：找不到 {image_path.name} 的標籤檔，跳過。')
+            continue
+        sources.append((image_path, *annotation))
+    return sources
+
+
+# ══════════════════════════════════════════════════════════════
+# 類別平衡擴增（每個 label 的 instance 數擴增到指定值）
+# ══════════════════════════════════════════════════════════════
+
+# 同一張來源影像連續失敗達此次數後不再取用（多半是檔案損毀或標註全部超界）
+MAX_SOURCE_FAILURES = 3
+
+
+def score_source_against_deficits(
+    label_counts: Counter,
+    deficits: Dict[str, int],
+) -> Tuple[int, int]:
+    """
+    評估單一來源影像對目前缺口的貢獻。
+    回傳 (gain, waste)：gain 是能補進缺口的 instance 數，
+    waste 是已達標類別上多產生的 instance 數。
+    """
+    gain = 0
+    waste = 0
+    for label, count in label_counts.items():
+        need = max(deficits.get(label, 0), 0)
+        gain += min(count, need)
+        waste += max(count - need, 0)
+    return gain, waste
+
+
+def select_balance_source(
+    source_label_counts: List[Counter],
+    deficits: Dict[str, int],
+    usage: List[int],
+    blocked: Optional[set] = None,
+) -> Optional[int]:
+    """
+    挑出最適合下一次擴增的來源索引。
+
+    一張影像常同時含多個類別，補足某個類別必然會讓其他類別超額，
+    因此以 gain - waste 為主要準則，優先選「補得最多、超額最少」的來源；
+    同分時選使用次數最少的，讓同一類別的擴增結果分散到不同原圖上。
+    沒有任何來源能再補足缺口時回傳 None。
+    """
+    blocked = blocked or set()
+    best_index: Optional[int] = None
+    best_key: Optional[tuple] = None
+
+    for index, label_counts in enumerate(source_label_counts):
+        if index in blocked:
+            continue
+        gain, waste = score_source_against_deficits(label_counts, deficits)
+        if gain <= 0:
+            continue
+        key = (gain - waste, -usage[index], -index)
+        if best_key is None or key > best_key:
+            best_key = key
+            best_index = index
+
+    return best_index
+
+
+def print_balance_report(
+    original_totals: Counter,
+    produced_totals: Counter,
+    per_class_count: int,
+):
+    """列出每個類別的原始 / 輸出 instance 數對照表。"""
+    label_width = max([len(str(label)) for label in original_totals] + [8])
+    print(f'{"類別".ljust(label_width)}{"原始":>10}{"輸出":>10}{"目標":>10}')
+    for label in sorted(original_totals, key=str):
+        print(
+            f'{str(label).ljust(label_width)}'
+            f'{original_totals[label]:>10}'
+            f'{produced_totals.get(label, 0):>10}'
+            f'{per_class_count:>10}'
+        )
+
+    shortfall = [
+        label for label in original_totals
+        if produced_totals.get(label, 0) < per_class_count
+    ]
+    if shortfall:
+        names = ', '.join(str(label) for label in sorted(shortfall, key=str))
+        print(
+            f'[警告] 下列類別未達目標：{names}；'
+            '可能是來源影像過少、影像無法讀取，或擴增後物件全部超出邊界。'
+        )
+
+
+def run_per_class_balance(
+    annotated_sources: list,
+    augmentation_types: List[str],
+    resolve_transforms: Callable[[str], Optional[list]],
+    per_class_count: int,
+    output_images_dir: Path,
+    output_labels_dir: Path,
+) -> int:
+    """
+    將每個類別的 bbox instance 數擴增到 per_class_count，並列出結果對照表。
+    輸出只含擴增結果，不複製原圖。回傳成功產生的影像/標籤組數。
+    """
+    source_label_counts = [
+        Counter(str(label) for label in source[2]) for source in annotated_sources
+    ]
+    original_totals: Counter = Counter()
+    for label_counts in source_label_counts:
+        original_totals.update(label_counts)
+
+    if not original_totals:
+        print('[提示] 所有標籤檔都沒有標註物件，未產生擴增結果。')
+        return 0
+
+    deficits: Dict[str, int] = {label: per_class_count for label in original_totals}
+    produced_totals: Counter = Counter()
+    usage = [0] * len(annotated_sources)
+    failures = [0] * len(annotated_sources)
+    blocked: set = set()
+
+    print(
+        f'找到 {len(annotated_sources)} 組可用影像/標籤、{len(original_totals)} 個類別，'
+        f'開始將每個類別擴增到 {per_class_count} 個 instance...'
+    )
+
+    total_needed = per_class_count * len(original_totals)
+    max_attempts = max(total_needed * 10, len(annotated_sources) * 10)
+    attempt_count = 0
+    success_count = 0
+    aug_cycle = 0
+
+    with tqdm(total=total_needed, desc='類別平衡擴增') as progress:
+        while attempt_count < max_attempts and any(v > 0 for v in deficits.values()):
+            index = select_balance_source(source_label_counts, deficits, usage, blocked)
+            if index is None:
+                break
+
+            attempt_count += 1
+            aug_type = augmentation_types[aug_cycle % len(augmentation_types)]
+            aug_cycle += 1
+            transforms_list = resolve_transforms(aug_type)
+            if transforms_list is None:
+                tqdm.write(f'警告：不支援的擴增類型 "{aug_type}"，跳過。')
+                continue
+
+            image_path, bboxes, class_labels, ann_format, save_func, ann_ext = \
+                annotated_sources[index]
+            suffix = f'{aug_type}_bal_{success_count + 1:05d}'
+            saved_labels = augment_single(
+                image_path, bboxes, class_labels, ann_format,
+                save_func, ann_ext, aug_type, transforms_list,
+                output_images_dir, output_labels_dir, suffix,
+            )
+
+            if saved_labels is None:
+                failures[index] += 1
+                if failures[index] >= MAX_SOURCE_FAILURES:
+                    blocked.add(index)
+                    tqdm.write(
+                        f'[警告] {image_path.name} 連續 {failures[index]} 次擴增失敗，'
+                        '後續不再取用。'
+                    )
+                continue
+
+            failures[index] = 0
+            usage[index] += 1
+            success_count += 1
+
+            produced = Counter(str(label) for label in saved_labels)
+            produced_totals.update(produced)
+            filled = 0
+            for label, count in produced.items():
+                filled += min(count, max(deficits.get(label, 0), 0))
+                deficits[label] = deficits.get(label, 0) - count
+            if filled:
+                progress.update(filled)
+
+    print(f'\n類別平衡擴增完成！成功產生 {success_count} 組影像/標籤（未複製原圖）')
+    print_balance_report(original_totals, produced_totals, per_class_count)
+    return success_count
 
 
 def run_annotated_augmentation(
@@ -669,6 +893,7 @@ def run_annotated_augmentation(
     rotate_limit: Optional[int],
     rotate_step: Optional[int],
     total_count: Optional[int] = None,
+    augment_per_class: Optional[int] = None,
 ):
     """標註同步擴增，支援 VOC / YOLO / CVAT 自動偵測"""
     output_images_dir = output_dir / 'images'
@@ -689,23 +914,36 @@ def run_annotated_augmentation(
     is_fixed_step = False
     if 'rotation' in augmentation_types:
         rotation_transforms, is_fixed_step = build_rotation_transforms(rotate_limit, rotate_step)
+    resolve_transforms = make_transforms_resolver(
+        rotation_transforms, is_fixed_step, rotate_step,
+    )
+
+    if augment_per_class is not None:
+        annotated_sources = load_annotated_sources(image_files, labels_dir)
+        if not annotated_sources:
+            print('[提示] 找不到任何可用的影像/標籤組合，未產生擴增結果。')
+            return
+
+        run_per_class_balance(
+            annotated_sources=annotated_sources,
+            augmentation_types=augmentation_types,
+            resolve_transforms=resolve_transforms,
+            per_class_count=augment_per_class,
+            output_images_dir=output_images_dir,
+            output_labels_dir=output_labels_dir,
+        )
+        print(f'  影像輸出：{output_images_dir}')
+        print(f'  標籤輸出：{output_labels_dir}')
+        return
 
     if total_count is not None:
-        annotated_sources = []
-        for image_path in image_files:
-            annotation = detect_and_load_annotations(image_path, labels_dir)
-            if annotation[0] is None:
-                tqdm.write(f'警告：找不到 {image_path.name} 的標籤檔，跳過。')
-                continue
-            annotated_sources.append((image_path, *annotation))
-
+        annotated_sources = load_annotated_sources(image_files, labels_dir)
         if not annotated_sources:
             print('[提示] 找不到任何可用的影像/標籤組合，未產生擴增結果。')
             return
 
         success_count = 0
         attempt_count = 0
-        rotation_attempt_count = 0
         candidate_count = len(annotated_sources) * len(augmentation_types)
         max_attempts = max(total_count * 10, candidate_count)
         print(
@@ -721,32 +959,17 @@ def run_annotated_augmentation(
                     annotated_sources[source_index]
                 attempt_count += 1
 
-                if aug_type == 'rotation':
-                    if rotation_transforms is None:
-                        continue
-                    if is_fixed_step:
-                        angle = (rotation_attempt_count * rotate_step) % 360
-                        transforms_list = [
-                            A.Rotate(
-                                limit=(angle, angle),
-                                p=1.0,
-                                border_mode=cv2.BORDER_CONSTANT,
-                                fill_value=0,
-                            )
-                        ] + rotation_transforms
-                    else:
-                        transforms_list = rotation_transforms
-                    rotation_attempt_count += 1
-                else:
-                    transforms_list = ANNOTATED_PIPELINE_TRANSFORMS[aug_type]
+                transforms_list = resolve_transforms(aug_type)
+                if transforms_list is None:
+                    continue
 
                 suffix = f'{aug_type}_total_{success_count + 1:05d}'
-                ok = augment_single(
+                saved_labels = augment_single(
                     image_path, bboxes, class_labels, ann_format,
                     save_func, ann_ext, aug_type, transforms_list,
                     output_images_dir, output_labels_dir, suffix,
                 )
-                if ok:
+                if saved_labels is not None:
                     success_count += 1
                     progress.update(1)
 
@@ -785,22 +1008,22 @@ def run_annotated_augmentation(
                                      border_mode=cv2.BORDER_CONSTANT, fill_value=0)
                         ] + rotation_transforms
                         suffix = f'rot{angle}'
-                        ok = augment_single(
+                        saved_labels = augment_single(
                             image_path, bboxes, class_labels, ann_format,
                             save_func, ann_ext, aug_type, step_transforms,
                             output_images_dir, output_labels_dir, suffix,
                         )
-                        if ok:
+                        if saved_labels is not None:
                             success_count += 1
                 else:
                     for i in range(num_augmentations):
                         suffix = f'rotation_{i + 1}' if num_augmentations > 1 else 'rotation'
-                        ok = augment_single(
+                        saved_labels = augment_single(
                             image_path, bboxes, class_labels, ann_format,
                             save_func, ann_ext, aug_type, rotation_transforms,
                             output_images_dir, output_labels_dir, suffix,
                         )
-                        if ok:
+                        if saved_labels is not None:
                             success_count += 1
 
             # ── 一般管道 ──
@@ -808,12 +1031,12 @@ def run_annotated_augmentation(
                 transforms_list = ANNOTATED_PIPELINE_TRANSFORMS[aug_type]
                 for i in range(num_augmentations):
                     suffix = f'{aug_type}_{i + 1}' if num_augmentations > 1 else aug_type
-                    ok = augment_single(
+                    saved_labels = augment_single(
                         image_path, bboxes, class_labels, ann_format,
                         save_func, ann_ext, aug_type, transforms_list,
                         output_images_dir, output_labels_dir, suffix,
                     )
-                    if ok:
+                    if saved_labels is not None:
                         success_count += 1
             else:
                 tqdm.write(f'警告：不支援的擴增類型 "{aug_type}"，跳過。')
@@ -864,6 +1087,9 @@ def main():
   # 指定整批總擴增數量（總共 100 張，不是每張原圖各 100 張）
   python image_augmentation_script.py -i ./images -o ./out --image_only --total_count 100
 
+  # 類別平衡：每個 label 在輸出中累積到 100 個 bbox instance（輸出不含原圖）
+  python image_augmentation_script.py -i ./dataset -o ./balanced -a mixed --augment_per_class 100
+
   # 純影像擴增：每個第一層子資料夾產生 200 張擴增影像（輸出不含原圖）
   python image_augmentation_script.py -i ./class_images -o ./balanced --image_only --augment_per_folder 200
 
@@ -905,6 +1131,9 @@ def main():
                         dest='augment_per_folder', type=int, default=None,
                         metavar='COUNT',
                         help='[image_only] 對輸入資料夾第一層每個子資料夾產生 COUNT 張擴增影像（輸出不含原圖；--target_per_folder 為舊別名）')
+    parser.add_argument('--augment_per_class',
+                        type=int, default=None, metavar='COUNT',
+                        help='[標註模式] 依標註內的類別平衡擴增，讓每個類別在輸出中累積到 COUNT 個 bbox instance（輸出不含原圖）')
     parser.add_argument('--seed', type=int, default=42,
                         help='隨機種子（預設：42）')
 
@@ -944,6 +1173,14 @@ def main():
         parser.error('--augment_per_folder 不能與 --total_count 同時使用')
     if args.augment_per_folder is not None and args.num_augmentations is not None:
         parser.error('--augment_per_folder 不能與 --num_augmentations 同時使用')
+    if args.augment_per_class is not None and args.augment_per_class <= 0:
+        parser.error('--augment_per_class 的數量必須大於 0')
+    if args.augment_per_class is not None and args.image_only:
+        parser.error('--augment_per_class 需要標註資料，不能與 --image_only 一起使用')
+    if args.augment_per_class is not None and args.total_count is not None:
+        parser.error('--augment_per_class 不能與 --total_count 同時使用')
+    if args.augment_per_class is not None and args.num_augmentations is not None:
+        parser.error('--augment_per_class 不能與 --num_augmentations 同時使用')
 
     print('=' * 60)
     print('影像擴增腳本')
@@ -969,7 +1206,9 @@ def main():
         else:
             print(f'擴增倍數：{num_augmentations}')
     if not args.image_only:
-        if args.total_count is not None:
+        if args.augment_per_class is not None:
+            print(f'每類別擴增：{args.augment_per_class} 個 instance（輸出不含原圖）')
+        elif args.total_count is not None:
             print(f'整批擴增總數：{args.total_count} 組')
         else:
             print(f'擴增倍數：{num_augmentations}')
@@ -1014,6 +1253,7 @@ def main():
             rotate_limit=args.rotate_limit,
             rotate_step=args.rotate_step,
             total_count=args.total_count,
+            augment_per_class=args.augment_per_class,
         )
 
     print('=' * 60)

@@ -105,7 +105,8 @@
   ```
 
 `image_augmentation_script.py`
-- **功能**: 支援 PASCAL VOC、YOLO 與 CVAT 標註同步擴增，也可使用保守的純影像擴增管道。`-n` 指定每張原圖的擴增版本數，`--total_count COUNT` 則直接指定整批要產生的擴增總數。`--image_only` 預設不旋轉，需以 `--image_only_rotate [MAX_ANGLE]` 明確開啟。分類資料夾可用 `--augment_per_folder COUNT` 讓每個第一層子資料夾產生固定張數的擴增影像，輸出不保留原圖。Connector 可用 `connector` profile，只模擬拍攝條件變化，不做旋轉、翻轉、透視或剪切，適合 pin row 位移與插錯 pin 檢測。
+- **功能**: 支援 PASCAL VOC、YOLO 與 CVAT 標註同步擴增，也可使用保守的純影像擴增管道。`-n` 指定每張原圖的擴增版本數，`--total_count COUNT` 則直接指定整批要產生的擴增總數。`--image_only` 預設不旋轉，需以 `--image_only_rotate [MAX_ANGLE]` 明確開啟。分類資料夾可用 `--augment_per_folder COUNT` 讓每個第一層子資料夾產生固定張數的擴增影像，輸出不保留原圖。標註資料則可用 `--augment_per_class COUNT` 做類別平衡擴增（詳見下方說明）。Connector 可用 `connector` profile，只模擬拍攝條件變化，不做旋轉、翻轉、透視或剪切，適合 pin row 位移與插錯 pin 檢測。
+- **類別平衡擴增 (`--augment_per_class`)**: 依標註內的類別名稱（VOC/CVAT 的 `<name>`、YOLO 的 class id）統計 bbox instance 數，反覆挑選最能補足目前缺口的原圖進行擴增，直到每個類別在輸出中都累積到指定的 instance 數。輸出只含擴增結果、不複製原圖，並會盡量把同一類別的擴增結果分散到不同原圖上（例如某類別只有 10 張原圖、要補到 100 個 instance，則每張各擴增 10 次）。由於一張影像常同時含多個類別，補足稀有類別時常見類別必然會超額，結束時會列出每個類別的「原始 / 輸出 / 目標」對照表。不能與 `-n`、`--total_count`、`--image_only` 併用。
 - **使用範例**:
   ```bash
   python image_augmentation_script.py -i ./dataset -o ./augmented_dataset -a horizontal_flip mixed
@@ -121,6 +122,9 @@
 
   # 含標註資料整批總共產生 100 組影像/標籤
   python image_augmentation_script.py -i ./images -l ./labels -o ./augmented -a mixed --total_count 100
+
+  # 類別平衡擴增：讓 XML 內每個 label 在輸出中都累積到 100 個 bbox instance（輸出不含原圖）
+  python image_augmentation_script.py -i ./dataset -o ./balanced -a mixed --augment_per_class 100
 
   # 分類資料夾擴增：./class_images/A、B、C 各自產生 200 張擴增影像（輸出不含原圖）
   python image_augmentation_script.py -i ./class_images -o ./balanced --image_only --augment_per_folder 200
