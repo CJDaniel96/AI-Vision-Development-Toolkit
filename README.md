@@ -59,6 +59,16 @@
 
 ### 資料集整備與分割 (Dataset Preparation & Splitting)
 
+`voc_label_counter.py`
+- **功能**: 遞迴掃描輸入資料夾中的影像與 PASCAL VOC XML，統計每個 label 的 bbox instance 數量，並顯示影像/XML 配對、缺檔、空標註與解析失敗摘要。
+- **使用範例**:
+  ```bash
+  python voc_label_counter.py -i ./voc_dataset
+
+  # 只掃描資料夾第一層
+  python voc_label_counter.py -i ./voc_dataset --no-recursive
+  ```
+
 `weighted_image_sampler.py`
 - **功能**: 統計來源資料夾中各第一層子資料夾的影像數量，依其占總資料量的比例計算加權抽樣數量，隨機抽取後複製到輸出資料夾。計算值小於 1 時至少抽 1 張，其餘採四捨五入；輸出會保留子資料夾結構。
 - **使用範例**:
