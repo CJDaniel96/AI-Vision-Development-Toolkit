@@ -106,6 +106,25 @@
 
 ### 影像擴增 (Image Augmentation)
 
+`obb_image_augmentation_script.py`
+- **功能**: 使用 Albumentations 2.x 同步擴增影像與 **YOLO OBB 四角點標註**。每行格式為 `class_id x1 y1 x2 y2 x3 y3 x4 y4`，座標須介於 0～1，四個頂點須沿框的邊依序排列。支援水平/垂直翻轉、亮度對比、色調飽和度、混合擴增與旋轉；透過 keypoints 保留四角點，旋轉與等比縮放時會擴張畫布。任意角度旋轉的補邊為灰色 `(114, 114, 114)`，輸出影像尺寸可能改變。
+- **輸出與數量**: 結果分放在輸出目錄的 `images/` 與 `labels/`，只包含擴增資料。`-n` 指定每張原圖、每種擴增的版本數；固定步長模式從 0° 產生至小於 360°，例如步長 45 會產生 8 組，不可與 `-n` 併用。`rotation` 只做旋轉；`mixed` 包含隨機翻轉、等比縮放、旋轉及光照畫質變化。`--rotate_limit` 控制 `mixed`/`rotation` 的隨機旋轉範圍，預設 ±30°。
+- **資料處理**: `-l` 省略時在影像同目錄尋找同名 `.txt`。`--recursive` 遞迴掃描並保留相對子目錄，標註目錄須有相同結構。空標註檔視為背景影像；缺失/無效標註與損壞影像會列警告並跳過。既有輸出不覆寫，請使用新的輸出目錄；`--seed` 預設 42，可在相同環境與輸入下重現結果。
+- **使用範例**:
+  ```bash
+  # 每張原圖產生 5 組混合擴增（影像與標註分開）
+  python obb_image_augmentation_script.py -i ./images -l ./labels -o ./obb_aug -a mixed -n 5
+
+  # 每隔 45° 產生一組，共 8 組（影像與標註同目錄）
+  python obb_image_augmentation_script.py -i ./dataset -o ./obb_rotated -a rotation --rotate_step 45
+
+  # 隨機旋轉 ±40°，每張產生 3 組
+  python obb_image_augmentation_script.py -i ./images -l ./labels -o ./obb_random -a rotation --rotate_limit 40 -n 3
+
+  # 多種擴增；保留 train/val 等子目錄結構
+  python obb_image_augmentation_script.py -i ./images -l ./labels -o ./obb_aug_all -a horizontal_flip vertical_flip brightness_contrast hue_saturation --recursive --seed 42
+  ```
+
 `augment_yolo.py` (推薦)
 - **功能**: 強大的影像擴增工具，可同時處理影像與標註（支援 YOLO, PASCAL VOC, CVAT 格式）。除了常見的翻轉、亮度調整外，還支援**固定角度步長旋轉**，可用於快速產生大量特定角度的擴增資料。
 - **使用範例**:
