@@ -182,6 +182,27 @@
   python aoi_ocr_classifier.py -i ./component_images -o ./classified_components -t "TARGET_TEXT"
   ```
 
+`image_center_crop.py`
+- **功能**: 依原圖寬、高的比例擷取中心區域，輸入可為單張影像或資料夾，輸出為指定資料夾。`--ratio` / `-r` 預設 `0.5`，範圍為 `0 < ratio <= 1`；例如 1920×1080 的影像設定 `0.5`，會從中心裁出 960×540（面積約為原圖的 25%）。尺寸無條件捨去至整數，最少保留 1 像素；邊界無法對稱分配時，多出的 1 像素會從右側或下側裁掉。
+- **檔案處理**: 支援 JPG、JPEG、PNG、BMP、TIF、TIFF、WebP；會先依 EXIF 校正影像方向，多幀影像僅處理第一幀。輸出保留原檔名與格式。預設僅處理資料夾第一層；加上 `--recursive` 會遞迴掃描並保留子目錄結構。輸出位於輸入資料夾內時會自動排除該輸出資料夾。既有同名輸出須使用 `--overwrite` 才會覆寫，且不允許覆蓋來源影像。損壞影像會列出錯誤並繼續處理其他影像；任一影像失敗時結束碼為 1。
+- **使用範例**:
+  ```bash
+  # 本工具只需要 Pillow（已列於 requirements.txt）
+  python -m pip install Pillow
+
+  # 單張影像：寬、高各保留 50%
+  python image_center_crop.py -i ./photo.jpg -o ./cropped -r 0.5
+
+  # 資料夾：寬、高各保留 80%
+  python image_center_crop.py -i ./images -o ./cropped --ratio 0.8
+
+  # 包含所有子資料夾，並保留原目錄結構
+  python image_center_crop.py -i ./images -o ./cropped -r 0.6 --recursive
+
+  # 重新產生並覆寫既有輸出
+  python image_center_crop.py -i ./images -o ./cropped -r 0.6 --recursive --overwrite
+  ```
+
 `image_rotator.py`
 - **功能**: 簡單的影像旋轉工具，可將指定資料夾內的所有影像分別旋轉 90、180、270 度，並存放到對應的子資料夾。
 - **使用範例**:
