@@ -4,6 +4,7 @@
 標註每行：class_id x1 y1 x2 y2 x3 y3 x4 y4，座標以影像寬高正規化，
 四個頂點須沿框的邊依序排列。CVAT 越界角點會先以補邊保留完整 OBB，
 輸出座標介於 [0, 1]。結果分放 images/ 與 labels/，不修改來源檔案。
+空標註或缺少 TXT 的影像皆視為背景，也會擴增並輸出配對的空 TXT。
 
 使用範例：
   python obb_image_augmentation_script.py -i ./images -l ./labels -o ./aug -a mixed -n 5
@@ -164,7 +165,7 @@ def run_augmentation(
     seed: int = 42,
     recursive: bool = False,
 ) -> AugmentationSummary:
-    """掃描配對標註並輸出擴增；遞迴模式保留相對路徑，缺失來源會列警告。"""
+    """輸出標註同步擴增；缺少 TXT 視為背景，無效標註或影像會列警告。"""
     images_dir, labels_dir, output_dir = (
         Path(directory).resolve() for directory in (images_dir, labels_dir, output_dir)
     )
@@ -211,7 +212,10 @@ def run_augmentation(
         relative_path = image_path.relative_to(images_dir)
         label_path = labels_dir / relative_path.with_suffix('.txt')
         try:
-            polygons, class_labels = load_yolo_obb_annotations(label_path)
+            try:
+                polygons, class_labels = load_yolo_obb_annotations(label_path)
+            except FileNotFoundError:
+                polygons, class_labels = [], []
             image_bgr = cv2.imread(str(image_path))
             if image_bgr is None:
                 raise ValueError(f'無法讀取影像：{image_path}')
@@ -268,7 +272,8 @@ CVAT 負值或大於 1 的角點會自動補邊並同步平移，輸出座標介
 -a original 僅做必要補邊，不做其他擴增；旋轉也會擴張畫布。
 輸出至 images/ 與 labels/，不修改來源檔案。
 --rotate_step 45 會為每張影像產生 0°、45°、…、315° 共 8 個版本。
-空標註檔視為背景影像；缺失或無效的標註會列出警告並跳過來源。''',
+空標註檔或缺少 TXT 的影像皆視為背景，擴增後會輸出配對的空 TXT。
+無效或無法讀取的標註、損壞影像會列出警告並跳過來源。''',
     )
     parser.add_argument('-i', '--images_dir', type=Path, required=True, help='輸入影像目錄')
     parser.add_argument('-l', '--labels_dir', type=Path, help='TXT 標註目錄（預設同影像目錄）')

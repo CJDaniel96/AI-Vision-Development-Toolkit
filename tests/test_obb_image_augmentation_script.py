@@ -278,14 +278,64 @@ class DatasetTests(unittest.TestCase):
         for split in ('train', 'val'):
             self.assertTrue((self.output / 'labels' / split / 'sample_horizontal_flip_1.txt').exists())
 
-    def test_invalid_missing_and_corrupt_sources_are_skipped(self):
+    def test_invalid_and_corrupt_sources_are_skipped_but_missing_labels_are_augmented(self):
         for name in ('good', 'invalid', 'missing', 'corrupt'):
             self.write_sample(name)
         (self.labels / 'invalid.txt').write_text('0 0.5 0.5 0.2 0.2')
         (self.labels / 'missing.txt').unlink()
         (self.images / 'corrupt.png').write_bytes(b'broken image')
         summary = self.run_dataset()
-        self.assertEqual((summary.generated, summary.skipped_sources), (1, 3))
+        self.assertEqual((summary.generated, summary.skipped_sources, summary.failed_outputs), (2, 2, 0))
+        self.assertEqual((self.output / 'labels/missing_horizontal_flip_1.txt').read_text(), '')
+
+    def test_unlabeled_backgrounds_get_all_profiles_and_requested_versions(self):
+        self.write_sample('train/background', [], [])
+        source_label = self.labels / 'train/background.txt'
+        source_label.unlink()
+        source_label.parent.rmdir()
+        image = np.random.default_rng(0).integers(0, 256, (80, 200, 3), dtype=np.uint8)
+        cv2.imwrite(str(self.images / 'train/background.png'), image)
+        profiles = [
+            'original', 'horizontal_flip', 'vertical_flip', 'brightness_contrast',
+            'hue_saturation', 'mixed', 'rotation',
+        ]
+        summary = self.run_dataset(
+            augmentation_types=profiles, num_augmentations=2, recursive=True,
+        )
+        self.assertEqual((summary.generated, summary.skipped_sources, summary.failed_outputs), (14, 0, 0))
+        for profile in profiles:
+            for index in (1, 2):
+                stem = f'background_{profile}_{index}'
+                label_path = self.output / 'labels/train' / f'{stem}.txt'
+                image_path = self.output / 'images/train' / f'{stem}.png'
+                self.assertEqual(label_path.read_text(), '')
+                self.assertIsNotNone(cv2.imread(str(image_path)))
+        flipped = cv2.imread(str(self.output / 'images/train/background_horizontal_flip_1.png'))
+        np.testing.assert_array_equal(flipped, np.flip(image, axis=1))
+        self.assertFalse(source_label.exists())
+
+    def test_cli_rotates_images_without_label_files_at_every_fixed_angle(self):
+        self.write_sample('background', [], [])
+        (self.labels / 'background.txt').unlink()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = main([
+                '-i', str(self.images), '-o', str(self.output),
+                '-a', 'rotation', '--rotate_step', '45',
+            ])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(list((self.output / 'images').glob('*.png'))), 8)
+        labels = list((self.output / 'labels').glob('*.txt'))
+        self.assertEqual({path.stem for path in labels}, {
+            f'background_rot{angle}_1' for angle in range(0, 360, 45)
+        })
+        self.assertTrue(all(path.read_text() == '' for path in labels))
+
+    def test_unreadable_label_is_skipped_instead_of_treated_as_background(self):
+        self.write_sample()
+        with patch('obb_image_augmentation_script.load_yolo_obb_annotations', side_effect=PermissionError('unreadable')):
+            summary = self.run_dataset()
+        self.assertEqual((summary.generated, summary.skipped_sources), (0, 1))
+        self.assertFalse(self.output.exists())
 
     def test_existing_outputs_are_preserved(self):
         self.write_sample()
