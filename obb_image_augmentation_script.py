@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """同步擴增影像與 YOLO OBB 四角點標註（需要 albumentations >= 2.0.8）。
 
-標註每行：class_id x1 y1 x2 y2 x3 y3 x4 y4，座標正規化至 [0, 1]，
-四個頂點須沿框的邊依序排列。輸出只含擴增結果，分放 images/ 與 labels/。
+標註每行：class_id x1 y1 x2 y2 x3 y3 x4 y4，座標以影像寬高正規化，
+四個頂點須沿框的邊依序排列。CVAT 越界角點會先以補邊保留完整 OBB，
+輸出座標介於 [0, 1]。結果分放 images/ 與 labels/，不修改來源檔案。
 
 使用範例：
   python obb_image_augmentation_script.py -i ./images -l ./labels -o ./aug -a mixed -n 5
   python obb_image_augmentation_script.py -i ./dataset -o ./aug -a rotation --rotate_step 45
+  python obb_image_augmentation_script.py -i ./images -l ./labels -o ./fixed -a original
 """
 
 import argparse
@@ -18,54 +20,19 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
-
-VALID_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
-AUGMENTATION_TYPES = (
-    'horizontal_flip', 'vertical_flip', 'brightness_contrast',
-    'hue_saturation', 'mixed', 'rotation',
+from yolo_obb_utils import (
+    PADDING_FILL,
+    load_yolo_obb_annotations,
+    pad_image_to_fit_obb,
+    save_yolo_obb_annotations,
 )
 
 
-def load_yolo_obb_annotations(label_path: Path) -> tuple[list, list[int]]:
-    """嚴格讀取四角點標註；空檔代表背景影像，缺檔或格式錯誤則拋出例外。"""
-    polygons, class_labels = [], []
-    for line_number, line in enumerate(
-        label_path.read_text(encoding='utf-8-sig').splitlines(), start=1
-    ):
-        parts = line.split()
-        if not parts:
-            continue
-        prefix = f'{label_path}:{line_number}'
-        if len(parts) != 9:
-            raise ValueError(f'{prefix}：YOLO OBB 每行必須恰好有 9 個欄位')
-        try:
-            class_id = int(parts[0])
-            points = np.array([float(value) for value in parts[1:]], dtype=np.float64)
-        except ValueError as error:
-            raise ValueError(f'{prefix}：類別須為整數，座標須為數值') from error
-        if class_id < 0:
-            raise ValueError(f'{prefix}：class_id 不可小於 0')
-        if not np.isfinite(points).all() or np.any((points < 0) | (points > 1)):
-            raise ValueError(f'{prefix}：座標必須為介於 0 與 1 的有限數值')
-        points = points.reshape(4, 2)
-        contour = points.astype(np.float32)
-        if not cv2.isContourConvex(contour) or cv2.contourArea(contour) <= 0:
-            raise ValueError(f'{prefix}：四角點須依序形成非退化的凸四邊形')
-        polygons.append(points.tolist())
-        class_labels.append(class_id)
-    return polygons, class_labels
-
-
-def save_yolo_obb_annotations(
-    label_path: Path, polygons: list, class_labels: list[int]
-) -> None:
-    """寫出 YOLO OBB，不覆寫既有標註檔。"""
-    lines = [
-        f"{class_id} {' '.join(f'{value:.8f}' for value in np.asarray(points).ravel())}\n"
-        for points, class_id in zip(polygons, class_labels, strict=True)
-    ]
-    with label_path.open('x', encoding='utf-8') as label_file:
-        label_file.writelines(lines)
+VALID_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
+AUGMENTATION_TYPES = (
+    'original', 'horizontal_flip', 'vertical_flip', 'brightness_contrast',
+    'hue_saturation', 'mixed', 'rotation',
+)
 
 
 def build_pipeline(
@@ -81,7 +48,7 @@ def build_pipeline(
             # 的半像素外緣，避免任意角度旋轉時貼邊框仍略微超出畫布。
             A.CropAndPad(
                 px=1, keep_size=False, border_mode=cv2.BORDER_CONSTANT,
-                fill=(114, 114, 114), p=1.0,
+                fill=PADDING_FILL, p=1.0,
             ),
             A.Affine(
                 rotate=rotation,
@@ -89,12 +56,14 @@ def build_pipeline(
                 keep_ratio=True,
                 fit_output=True,
                 border_mode=cv2.BORDER_CONSTANT,
-                fill=(114, 114, 114),
+                fill=PADDING_FILL,
                 p=1.0,
             ),
         ], p=probability)
 
-    if augmentation_type == 'horizontal_flip':
+    if augmentation_type == 'original':
+        transforms = [A.NoOp(p=1.0)]
+    elif augmentation_type == 'horizontal_flip':
         transforms = [A.HorizontalFlip(p=1.0)]
     elif augmentation_type == 'vertical_flip':
         transforms = [A.VerticalFlip(p=1.0)]
@@ -153,11 +122,12 @@ def augment_obb(
     class_labels: list[int],
     pipeline: A.Compose,
 ) -> tuple[np.ndarray, list, list[int]]:
-    """以 keypoints 同步轉換各 OBB，並依輸出畫布尺寸重新正規化。"""
+    """先補邊容納越界 OBB，再同步擴增影像與角點，依輸出尺寸重新正規化。"""
     if len(polygons) != len(class_labels):
         raise ValueError('OBB 數量與類別數量不一致')
+    image_rgb, polygons = pad_image_to_fit_obb(image_rgb, polygons)
     height, width = image_rgb.shape[:2]
-    points = np.asarray(polygons, dtype=np.float32).reshape(-1, 2)
+    points = np.asarray(polygons, dtype=np.float64).reshape(-1, 2)
     # YOLO 描述像素邊界 [0, width]；Albumentations keypoints 描述像素中心
     # [0, width-1]。以半像素轉換，讓翻轉後 x 正確等於 1-x，且邊界 0/1 合法。
     keypoints = points * [width, height] - 0.5
@@ -293,8 +263,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description='YOLO OBB 影像與四角點標註同步擴增（Albumentations 2.x）',
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog='''標註每行：class_id x1 y1 x2 y2 x3 y3 x4 y4（座標介於 0～1）。
-旋轉會擴張畫布；輸出至 images/ 與 labels/，只含擴增結果。
+        epilog='''標註每行：class_id x1 y1 x2 y2 x3 y3 x4 y4（以影像寬高正規化）。
+CVAT 負值或大於 1 的角點會自動補邊並同步平移，輸出座標介於 0～1。
+-a original 僅做必要補邊，不做其他擴增；旋轉也會擴張畫布。
+輸出至 images/ 與 labels/，不修改來源檔案。
 --rotate_step 45 會為每張影像產生 0°、45°、…、315° 共 8 個版本。
 空標註檔視為背景影像；缺失或無效的標註會列出警告並跳過來源。''',
     )
@@ -302,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('-l', '--labels_dir', type=Path, help='TXT 標註目錄（預設同影像目錄）')
     parser.add_argument('-o', '--output_dir', type=Path, required=True, help='輸出目錄')
     parser.add_argument('-a', '--augmentations', nargs='+', choices=AUGMENTATION_TYPES,
-                        default=['mixed'], help='擴增類型，可指定多種（預設 mixed）')
+                        default=['mixed'], help='擴增類型，可指定多種；original 僅修正越界（預設 mixed）')
     parser.add_argument('-n', '--num_augmentations', type=int,
                         help='每張影像、每種擴增的版本數（預設 1）')
     rotation = parser.add_mutually_exclusive_group()

@@ -22,6 +22,11 @@ BOXES = [
     [[0, 0], [1, 0], [1, 1], [0, 1]],
     [[0.1, 0.2], [0.3, 0.2], [0.3, 0.5], [0.1, 0.5]],
 ]
+# 在 200×80 影像上，第一個框為旋轉 45° 的正方形，四邊皆超出影像。
+OUTSIDE_BOXES = [
+    [[-0.05, 0.5], [0.5, -0.875], [1.05, 0.5], [0.5, 1.875]],
+    BOXES[1],
+]
 
 
 class AnnotationTests(unittest.TestCase):
@@ -43,6 +48,12 @@ class AnnotationTests(unittest.TestCase):
         self.path.write_text('\n  \n')
         self.assertEqual(load_yolo_obb_annotations(self.path), ([], []))
 
+    def test_cvat_out_of_bounds_coordinates_are_loaded_without_clipping(self):
+        save_yolo_obb_annotations(self.path, OUTSIDE_BOXES, [7, 19])
+        boxes, labels = load_yolo_obb_annotations(self.path)
+        np.testing.assert_allclose(boxes, OUTSIDE_BOXES)
+        self.assertEqual(labels, [7, 19])
+
     def test_invalid_labels_report_filename_and_line(self):
         for line in (
             '0 0.5 0.5 0.2 0.2',  # HBB 不能當 OBB 讀入
@@ -50,8 +61,6 @@ class AnnotationTests(unittest.TestCase):
             '1.5 0 0 1 0 1 1 0 1',
             '0 nan 0 1 0 1 1 0 1',
             '0 inf 0 1 0 1 1 0 1',
-            '0 -0.1 0 1 0 1 1 0 1',
-            '0 0 0 1.1 0 1 1 0 1',
             '0 0 0 0 0 0 0 0 0',
             '0 0 0 1 1 1 0 0 1',  # 自交四邊形
         ):
@@ -64,6 +73,66 @@ class AnnotationTests(unittest.TestCase):
 class GeometryTests(unittest.TestCase):
     def setUp(self):
         self.image = np.random.default_rng(0).integers(0, 256, (80, 200, 3), dtype=np.uint8)
+
+    def test_padding_preserves_source_pixels_and_every_box(self):
+        image, boxes, labels = augment_obb(
+            self.image, OUTSIDE_BOXES, [7, 19], build_pipeline('original'),
+        )
+        self.assertEqual(image.shape, (220, 220, 3))
+        np.testing.assert_array_equal(image[70:150, 10:210], self.image)
+        background = np.ones((220, 220), dtype=bool)
+        background[70:150, 10:210] = False
+        self.assertTrue(np.all(image[background] == 114))
+        np.testing.assert_allclose(
+            np.asarray(boxes) * [220, 220],
+            np.asarray(OUTSIDE_BOXES) * [200, 80] + [10, 70],
+            atol=1e-5,
+        )
+        self.assertEqual(labels, [7, 19])
+        self.assertTrue(np.all(np.asarray(boxes) >= 0))
+        self.assertTrue(np.all(np.asarray(boxes) <= 1))
+
+    def test_fractional_pixel_overflow_rounds_padding_outward(self):
+        points = np.array([
+            [[-2.5, 10], [10, -2.5], [22.5, 10], [10, 22.5]],
+            [[187.5, 70], [200, 57.5], [212.5, 70], [200, 82.5]],
+        ])
+        image, boxes, labels = augment_obb(
+            self.image, (points / [200, 80]).tolist(), [7, 19],
+            build_pipeline('original'),
+        )
+        self.assertEqual(image.shape, (86, 216, 3))
+        np.testing.assert_array_equal(image[3:83, 3:203], self.image)
+        np.testing.assert_allclose(np.asarray(boxes) * [216, 86], points + [3, 3], atol=1e-5)
+        self.assertEqual(labels, [7, 19])
+
+    def test_padded_boxes_keep_pixel_geometry_through_flips_and_rotation(self):
+        source_points = (np.asarray(OUTSIDE_BOXES) * [200, 80]).reshape(-1, 2)
+        source_distances = np.linalg.norm(source_points[:, None] - source_points[None, :], axis=-1)
+        for profile, angle in (
+            ('horizontal_flip', None), ('vertical_flip', None),
+            ('rotation', 90), ('rotation', 33),
+        ):
+            with self.subTest(profile=profile, angle=angle):
+                image, boxes, labels = augment_obb(
+                    self.image, OUTSIDE_BOXES, [7, 19], build_pipeline(profile, angle=angle),
+                )
+                points = (np.asarray(boxes) * [image.shape[1], image.shape[0]]).reshape(-1, 2)
+                distances = np.linalg.norm(points[:, None] - points[None, :], axis=-1)
+                np.testing.assert_allclose(distances, source_distances, atol=1e-4)
+                self.assertTrue(np.all(np.asarray(boxes) >= 0))
+                self.assertTrue(np.all(np.asarray(boxes) <= 1))
+                self.assertEqual(labels, [7, 19])
+
+    def test_original_mode_keeps_in_bounds_images_and_backgrounds_unchanged(self):
+        for boxes, labels in ((BOXES, [7, 19]), ([], [])):
+            with self.subTest(labels=labels):
+                image, result, result_labels = augment_obb(
+                    self.image, boxes, labels, build_pipeline('original'),
+                )
+                np.testing.assert_array_equal(image, self.image)
+                np.testing.assert_allclose(result, boxes, atol=1e-7)
+                self.assertEqual(result_labels, labels)
 
     def test_flips_use_normalized_edges_without_pixel_offset(self):
         for profile, axis in (('horizontal_flip', 1), ('vertical_flip', 0)):
@@ -255,6 +324,25 @@ class DatasetTests(unittest.TestCase):
             code = main(['-i', str(self.images), '-o', str(self.output), '-a', 'rotation', '--rotate_step', '45'])
         self.assertEqual(code, 0)
         self.assertEqual(len(list((self.output / 'labels').glob('*.txt'))), 8)
+
+    def test_cli_repairs_cvat_labels_without_other_augmentation(self):
+        self.write_sample(boxes=OUTSIDE_BOXES)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = main([
+                '-i', str(self.images), '-l', str(self.labels), '-o', str(self.output),
+                '-a', 'original',
+            ])
+        self.assertEqual(code, 0)
+        image = cv2.imread(str(self.output / 'images/sample_original_1.png'))
+        boxes, labels = load_yolo_obb_annotations(self.output / 'labels/sample_original_1.txt')
+        self.assertEqual(image.shape, (220, 220, 3))
+        np.testing.assert_allclose(
+            np.asarray(boxes) * [220, 220],
+            np.asarray(OUTSIDE_BOXES) * [200, 80] + [10, 70],
+            atol=2e-6,
+        )
+        self.assertEqual(labels, [7, 19])
+        self.assertTrue(np.all(image[70:150, 10:210] == 150))
 
     def test_invalid_cli_options_exit_before_writing(self):
         base = ['-i', str(self.images), '-o', str(self.output)]

@@ -29,6 +29,27 @@
   python voc2yolo.py --input ./voc_data --output ./yolo_dataset --split 0.7 0.2 0.1
   ```
 
+`obb2yolo.py`
+- **功能**: 將 YOLO OBB 四角點影像/TXT 配對資料整理成 `images/{train,val,test}`、`labels/{train,val,test}`，並產生可供 OBB 訓練使用的 `data.yaml`。依影像內的類別組合近似分層抽樣，同時維持整體分割數量；少量資料優先保留非空的 train 與 val。
+- **輸入**: 每行為 `class_id x1 y1 x2 y2 x3 y3 x4 y4`，四角點沿框的邊依序排列，座標以原圖寬高正規化。可傳入影像/TXT 同目錄、含 `images/` 與 `labels/` 的 CVAT 匯出根目錄，或用 `--labels` 指定分離的標註目錄。遞迴掃描並保留相對子目錄；此工具不讀取 DOTA 像素座標或中心/寬高/角度格式。
+- **越界修正**: 自動依所有框的最外側角點補灰邊 `(114, 114, 114)`，同步平移所有角點，重新正規化至 `[0, 1]`，保留原 OBB 的形狀與角度；不修改來源。補邊後尺寸可能增加，訓練須搭配輸出的影像與標註。
+- **類別與分割**: `--classes` 接受每行一個名稱的 TXT，或含 `names` 的 YAML；未指定時自動尋找資料集的 `data.yaml` / `classes.txt`，再以 `class_0`、`class_1`…作為備用名稱。保留原始 class_id，不重新編號或依清單過濾物件；名稱列表須涵蓋所有 ID。`--split` 接受 train/val 或 train/val/test，預設 `0.7 0.2 0.1`，比例會正規化，train/val 比例須大於 0。至少需 2 張有效影像；稀少類別無法保證出現在所有分割中，`--seed` 預設 42。
+- **資料處理**: 空 TXT 視為背景；缺失/無效標註與損壞影像會警告並跳過，只有加上 `--missing-as-background` 才將缺少 TXT 的影像視為背景。輸出目錄必須尚未存在；全部寫入成功後才產生正式資料集。讀寫與補邊邏輯由同目錄的 `yolo_obb_utils.py` 共用。
+- **使用範例**:
+  ```bash
+  # 影像與 TXT 放在同一目錄
+  python obb2yolo.py --input ./obb_data --output ./yolo_obb --classes ./classes.txt --split 0.7 0.2 0.1
+
+  # CVAT Ultralytics YOLO OBB 匯出，包含 images/、labels/、data.yaml
+  python obb2yolo.py --input ./cvat_export --output ./yolo_obb
+
+  # 影像與標註分開，只建立 train 與 val
+  python obb2yolo.py -i ./images -l ./labels -o ./yolo_obb --classes ./classes.txt --split 0.8 0.2
+
+  # 使用產生的設定檔訓練 OBB 模型
+  yolo obb train model=yolo11n-obb.pt data=./yolo_obb/data.yaml imgsz=640
+  ```
+
 `yolo_pascal_voc_converter.py`
 - **功能**: 使用 YOLO 模型對影像或影片進行物件偵測，並將偵測結果儲存為 PASCAL VOC (.xml) 格式。
 - **使用範例**:
@@ -107,11 +128,15 @@
 ### 影像擴增 (Image Augmentation)
 
 `obb_image_augmentation_script.py`
-- **功能**: 使用 Albumentations 2.x 同步擴增影像與 **YOLO OBB 四角點標註**。每行格式為 `class_id x1 y1 x2 y2 x3 y3 x4 y4`，座標須介於 0～1，四個頂點須沿框的邊依序排列。支援水平/垂直翻轉、亮度對比、色調飽和度、混合擴增與旋轉；透過 keypoints 保留四角點，旋轉與等比縮放時會擴張畫布。任意角度旋轉的補邊為灰色 `(114, 114, 114)`，輸出影像尺寸可能改變。
-- **輸出與數量**: 結果分放在輸出目錄的 `images/` 與 `labels/`，只包含擴增資料。`-n` 指定每張原圖、每種擴增的版本數；固定步長模式從 0° 產生至小於 360°，例如步長 45 會產生 8 組，不可與 `-n` 併用。`rotation` 只做旋轉；`mixed` 包含隨機翻轉、等比縮放、旋轉及光照畫質變化。`--rotate_limit` 控制 `mixed`/`rotation` 的隨機旋轉範圍，預設 ±30°。
+- **功能**: 使用 Albumentations 2.x 同步擴增影像與 **YOLO OBB 四角點標註**。每行格式為 `class_id x1 y1 x2 y2 x3 y3 x4 y4`，座標以影像寬高正規化，四個頂點須沿框的邊依序排列。支援水平/垂直翻轉、亮度對比、色調飽和度、混合擴增與旋轉；透過 keypoints 保留四角點，旋轉與等比縮放時會擴張畫布。補邊為灰色 `(114, 114, 114)`，輸出影像尺寸可能改變。
+- **CVAT 越界標註修正**: 輸入允許負值或大於 1 的角點；擴增前依所有框的最外側角點向外取整補邊，同步平移所有角點，依輸出尺寸重新正規化至 `[0, 1]`，保留原 OBB 的角度與像素尺寸。`-a original` 僅做必要補邊，不做其他擴增；影像與標註會一起輸出，不修改來源。此修正不會逐點截斷座標，也不會重建畫面外的物體內容。
+- **輸出與數量**: 結果分放在輸出目錄的 `images/` 與 `labels/`，包含所選模式的處理結果。`-n` 指定每張原圖、每種擴增的版本數；固定步長模式從 0° 產生至小於 360°，例如步長 45 會產生 8 組，不可與 `-n` 併用。`rotation` 只做旋轉；`mixed` 包含隨機翻轉、等比縮放、旋轉及光照畫質變化。`--rotate_limit` 控制 `mixed`/`rotation` 的隨機旋轉範圍，預設 ±30°。
 - **資料處理**: `-l` 省略時在影像同目錄尋找同名 `.txt`。`--recursive` 遞迴掃描並保留相對子目錄，標註目錄須有相同結構。空標註檔視為背景影像；缺失/無效標註與損壞影像會列警告並跳過。既有輸出不覆寫，請使用新的輸出目錄；`--seed` 預設 42，可在相同環境與輸入下重現結果。
 - **使用範例**:
   ```bash
+  # 僅修正 CVAT 越界 OBB，不做其他擴增
+  python obb_image_augmentation_script.py -i ./images -l ./labels -o ./obb_fixed -a original
+
   # 每張原圖產生 5 組混合擴增（影像與標註分開）
   python obb_image_augmentation_script.py -i ./images -l ./labels -o ./obb_aug -a mixed -n 5
 
