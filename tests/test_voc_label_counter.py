@@ -3,7 +3,7 @@ import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from voc_label_counter import collect_statistics, main
+from vision_toolkit.voc_label_counter import collect_statistics, main
 
 
 def write_voc_xml(path: Path, labels: list[str]) -> None:

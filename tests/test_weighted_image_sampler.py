@@ -3,7 +3,7 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 
-from weighted_image_sampler import calculate_allocations, sample_and_copy
+from vision_toolkit.weighted_image_sampler import calculate_allocations, sample_and_copy
 
 
 class CalculateAllocationsTests(unittest.TestCase):

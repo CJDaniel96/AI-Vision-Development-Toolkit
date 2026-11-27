@@ -7,7 +7,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from image_augmentation_script import (
+from vision_toolkit.image_augmentation_script import (
     make_transforms_resolver,
     run_annotated_augmentation,
     score_source_against_deficits,
@@ -102,7 +102,8 @@ class SelectBalanceSourceTests(unittest.TestCase):
 class MakeTransformsResolverTests(unittest.TestCase):
     def test_advances_angle_only_for_rotation(self):
         resolve = make_transforms_resolver(
-            rotation_transforms=[], is_fixed_step=True, rotate_step=90
+            rotation_transforms=[], is_fixed_step=True, rotate_step=90,
+            annotated_transforms={'mixed': []},
         )
 
         angles = []
@@ -113,7 +114,7 @@ class MakeTransformsResolverTests(unittest.TestCase):
         self.assertEqual(angles, [(0, 0), (90, 90), (180, 180)])
 
     def test_returns_none_for_unknown_type(self):
-        resolve = make_transforms_resolver(None, False, None)
+        resolve = make_transforms_resolver(None, False, None, {})
 
         self.assertIsNone(resolve('does_not_exist'))
         self.assertIsNone(resolve('rotation'))

@@ -9,8 +9,8 @@ import cv2
 import numpy as np
 import yaml
 
-from obb2yolo import OBBSample, load_class_names, main, normalize_split, prepare_dataset, split_samples
-from yolo_obb_utils import load_yolo_obb_annotations, save_yolo_obb_annotations
+from vision_toolkit.obb2yolo import OBBSample, load_class_names, main, normalize_split, prepare_dataset, split_samples
+from vision_toolkit.yolo_obb_utils import load_yolo_obb_annotations, save_yolo_obb_annotations
 
 
 BOXES = [
@@ -228,7 +228,7 @@ class DatasetTests(unittest.TestCase):
     def test_write_failure_removes_staging_and_never_publishes_partial_dataset(self):
         self.write_sample('outside', BOXES, [0, 1])
         self.write_sample('two')
-        with patch('obb2yolo.cv2.imwrite', return_value=False):
+        with patch('vision_toolkit.obb2yolo.cv2.imwrite', return_value=False):
             with self.assertRaisesRegex(OSError, '寫入失敗'):
                 self.run_dataset()
         self.assertFalse(self.output.exists())

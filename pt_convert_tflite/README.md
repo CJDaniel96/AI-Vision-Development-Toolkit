@@ -11,10 +11,10 @@ This tool converts YOLOv8 PyTorch models (`.pt`) to TensorFlow Lite (`.tflite`) 
 
 ## Requirements
 
-The smart camera (or the PC performing the conversion) must have Python 3.8+ and the following libraries:
+The smart camera (or the PC performing the conversion) must have Python 3.12+ and the following libraries:
 
 ```bash
-pip install -r requirements.txt
+pip install -r pt_convert_tflite/requirements.txt
 ```
 
 **Key dependencies:**
@@ -30,13 +30,13 @@ pip install -r requirements.txt
 Convert a model using default settings (downloads calibration data automatically):
 
 ```bash
-python pt2tflite.py --model your_model.pt
+python main.py model export-tflite --model your_model.pt
 ```
 
 ### Advanced Usage
 
 ```bash
-python pt2tflite.py \
+python main.py model export-tflite \
   --model custom_best.pt \
   --output custom_model_int8.tflite \
   --img_size 640 \

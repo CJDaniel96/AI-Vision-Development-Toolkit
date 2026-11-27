@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from image_center_crop import center_crop, main
+from vision_toolkit.image_center_crop import center_crop, main
 
 
 class CenterCropTests(unittest.TestCase):

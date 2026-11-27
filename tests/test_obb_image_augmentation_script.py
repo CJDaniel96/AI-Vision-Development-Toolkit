@@ -8,7 +8,7 @@ from unittest.mock import patch
 import cv2
 import numpy as np
 
-from obb_image_augmentation_script import (
+from vision_toolkit.obb_image_augmentation_script import (
     augment_obb,
     build_pipeline,
     load_yolo_obb_annotations,
@@ -332,7 +332,7 @@ class DatasetTests(unittest.TestCase):
 
     def test_unreadable_label_is_skipped_instead_of_treated_as_background(self):
         self.write_sample()
-        with patch('obb_image_augmentation_script.load_yolo_obb_annotations', side_effect=PermissionError('unreadable')):
+        with patch('vision_toolkit.obb_image_augmentation_script.load_yolo_obb_annotations', side_effect=PermissionError('unreadable')):
             summary = self.run_dataset()
         self.assertEqual((summary.generated, summary.skipped_sources), (0, 1))
         self.assertFalse(self.output.exists())
@@ -348,14 +348,14 @@ class DatasetTests(unittest.TestCase):
 
     def test_image_write_failure_does_not_create_annotation(self):
         self.write_sample()
-        with patch('obb_image_augmentation_script.cv2.imwrite', return_value=False):
+        with patch('vision_toolkit.obb_image_augmentation_script.cv2.imwrite', return_value=False):
             summary = self.run_dataset()
         self.assertEqual((summary.generated, summary.failed_outputs), (0, 1))
         self.assertEqual(list((self.output / 'labels').iterdir()), [])
 
     def test_label_write_failure_removes_written_image(self):
         self.write_sample()
-        with patch('obb_image_augmentation_script.save_yolo_obb_annotations', side_effect=OSError('disk full')):
+        with patch('vision_toolkit.obb_image_augmentation_script.save_yolo_obb_annotations', side_effect=OSError('disk full')):
             summary = self.run_dataset()
         self.assertEqual((summary.generated, summary.failed_outputs), (0, 1))
         self.assertEqual(list((self.output / 'images').iterdir()), [])

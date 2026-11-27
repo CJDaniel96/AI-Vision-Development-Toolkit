@@ -1,0 +1,156 @@
+{
+  "shared": {
+    "brightness_contrast": [
+      {"transform": "RandomBrightnessContrast", "brightness_limit": 0.2, "contrast_limit": 0.2, "p": 1.0}
+    ],
+    "connector": [
+      {
+        "transform": "OneOf",
+        "transforms": [
+          {"transform": "RandomBrightnessContrast", "brightness_limit": 0.08, "contrast_limit": 0.1, "p": 1.0},
+          {"transform": "RandomGamma", "gamma_limit": [90, 110], "p": 1.0},
+          {"transform": "CLAHE", "clip_limit": [1.0, 2.0], "tile_grid_size": [8, 8], "p": 1.0}
+        ],
+        "p": 0.65
+      },
+      {"transform": "HueSaturationValue", "hue_shift_limit": 3, "sat_shift_limit": 6, "val_shift_limit": 6, "p": 0.25},
+      {
+        "transform": "OneOf",
+        "transforms": [
+          {"transform": "MotionBlur", "blur_limit": 3, "p": 1.0},
+          {"transform": "GaussianBlur", "blur_limit": [3, 3], "p": 1.0},
+          {"transform": "ImageCompression", "quality_range": [92, 100], "p": 1.0}
+        ],
+        "p": 0.2
+      },
+      {
+        "transform": "OneOf",
+        "transforms": [
+          {"transform": "GaussNoise", "std_range": [0.005, 0.02], "mean_range": [0.0, 0.0], "per_channel": true, "noise_scale_factor": 1.0, "p": 1.0},
+          {"transform": "ISONoise", "color_shift": [0.005, 0.015], "intensity": [0.03, 0.1], "p": 1.0}
+        ],
+        "p": 0.12
+      }
+    ]
+  },
+  "annotated": {
+    "horizontal_flip": [
+      {"transform": "HorizontalFlip", "p": 1.0}
+    ],
+    "hue_saturation": [
+      {"transform": "HueSaturationValue", "hue_shift_limit": 20, "sat_shift_limit": 30, "val_shift_limit": 20, "p": 1.0}
+    ],
+    "mixed": [
+      {"transform": "HorizontalFlip", "p": 0.5},
+      {"transform": "RandomBrightnessContrast", "brightness_limit": 0.15, "contrast_limit": 0.15, "p": 0.5},
+      {"transform": "HueSaturationValue", "hue_shift_limit": 15, "sat_shift_limit": 20, "val_shift_limit": 15, "p": 0.5}
+    ],
+    "smart_camera": [
+      {"transform": "LongestMaxSize", "max_size": 960, "p": 1.0},
+      {"transform": "PadIfNeeded", "min_height": 960, "min_width": 960, "border_mode": "BORDER_CONSTANT", "fill": 0, "p": 1.0},
+      {"transform": "Affine", "scale": [0.95, 1.05], "translate_percent": {"x": [-0.03, 0.03], "y": [-0.03, 0.03]}, "rotate": [-5, 5], "shear": [-3, 3], "border_mode": "BORDER_CONSTANT", "fill": 0, "p": 0.6},
+      {
+        "transform": "OneOf",
+        "transforms": [
+          {"transform": "RandomBrightnessContrast", "brightness_limit": 0.15, "contrast_limit": 0.15, "p": 1.0},
+          {"transform": "RandomGamma", "gamma_limit": [85, 115], "p": 1.0}
+        ],
+        "p": 0.5
+      },
+      {
+        "transform": "OneOf",
+        "transforms": [
+          {"transform": "MotionBlur", "blur_limit": [3, 5], "p": 1.0},
+          {"transform": "GaussianBlur", "blur_limit": [3, 5], "p": 1.0},
+          {"transform": "ImageCompression", "quality_range": [70, 95], "p": 1.0}
+        ],
+        "p": 0.25
+      },
+      {"transform": "CoarseDropout", "num_holes_range": [1, 3], "hole_height_range": [0.03, 0.08], "hole_width_range": [0.03, 0.08], "fill": 0, "p": 0.15}
+    ],
+    "hz_pde": [
+      {
+        "transform": "OneOf",
+        "transforms": [
+          {"transform": "Affine", "scale": [0.95, 1.05], "translate_percent": {"x": [-0.03, 0.03], "y": [-0.03, 0.03]}, "rotate": [-5, 5], "shear": [-3, 3], "interpolation": "INTER_LINEAR", "border_mode": "BORDER_CONSTANT", "p": 1.0}
+        ],
+        "p": 0.6
+      },
+      {"transform": "HorizontalFlip", "p": 0.5},
+      {
+        "transform": "OneOf",
+        "transforms": [
+          {"transform": "RandomBrightnessContrast", "brightness_limit": 0.15, "contrast_limit": 0.15, "p": 1.0},
+          {"transform": "ColorJitter", "brightness": 0.12, "contrast": 0.12, "saturation": 0.08, "hue": 0.03, "p": 1.0}
+        ],
+        "p": 0.5
+      },
+      {
+        "transform": "OneOf",
+        "transforms": [
+          {"transform": "MotionBlur", "blur_limit": 5, "p": 1.0},
+          {"transform": "GaussianBlur", "blur_limit": [3, 5], "p": 1.0},
+          {"transform": "ImageCompression", "quality_range": [70, 95], "p": 1.0},
+          {"transform": "GaussNoise", "std_range": [0.01, 0.03], "p": 1.0}
+        ],
+        "p": 0.35
+      },
+      {"transform": "CoarseDropout", "num_holes_range": [1, 3], "hole_height_range": [0.03, 0.08], "hole_width_range": [0.03, 0.08], "fill": 0, "p": 0.15}
+    ],
+    "hz_pde_traditional": [
+      {"transform": "CropAndPad", "percent": 0.05, "keep_size": false, "border_mode": "BORDER_CONSTANT", "fill": [114, 114, 114], "p": 1.0},
+      {"transform": "Affine", "scale": [0.95, 1.05], "rotate": [-2, 2], "shear": [-1, 1], "fit_output": true, "keep_ratio": true, "border_mode": "BORDER_CONSTANT", "fill": [114, 114, 114], "interpolation": "INTER_LINEAR", "p": 0.4},
+      {"transform": "HorizontalFlip", "p": 0.0},
+      {"transform": "RandomBrightnessContrast", "brightness_limit": 0.15, "contrast_limit": 0.15, "p": 0.4},
+      {"transform": "HueSaturationValue", "hue_shift_limit": 3, "sat_shift_limit": 10, "val_shift_limit": 10, "p": 0.25},
+      {
+        "transform": "OneOf",
+        "transforms": [
+          {"transform": "GaussianBlur", "blur_limit": [3, 3], "p": 1.0},
+          {"transform": "GaussNoise", "std_range": [0.01, 0.03], "p": 1.0},
+          {"transform": "ImageCompression", "quality_range": [85, 100], "p": 1.0}
+        ],
+        "p": 0.15
+      }
+    ],
+    "rotation": [
+      {"transform": "HorizontalFlip", "p": 0.5},
+      {"transform": "Perspective", "scale": [0.05, 0.1], "p": 0.3},
+      {"transform": "RandomBrightnessContrast", "brightness_limit": 0.2, "contrast_limit": 0.2, "p": 0.5},
+      {"transform": "HueSaturationValue", "hue_shift_limit": 20, "sat_shift_limit": 30, "val_shift_limit": 20, "p": 0.3}
+    ]
+  },
+  "image_only": {
+    "default": [
+      {"transform": "RandomBrightnessContrast", "brightness_limit": 0.08, "contrast_limit": 0.08, "p": 0.6},
+      {"transform": "HueSaturationValue", "hue_shift_limit": 5, "sat_shift_limit": 8, "val_shift_limit": 8, "p": 0.3},
+      {
+        "transform": "OneOf",
+        "transforms": [
+          {"transform": "MotionBlur", "blur_limit": 3, "p": 1.0},
+          {"transform": "GaussianBlur", "blur_limit": [3, 3], "p": 1.0},
+          {"transform": "ImageCompression", "quality_range": [90, 100], "p": 1.0}
+        ],
+        "p": 0.2
+      },
+      {
+        "transform": "OneOf",
+        "transforms": [
+          {"transform": "GaussNoise", "std_range": [0.01, 0.03], "mean_range": [0.0, 0.0], "per_channel": true, "noise_scale_factor": 1.0, "p": 1.0},
+          {"transform": "ISONoise", "color_shift": [0.01, 0.02], "intensity": [0.05, 0.15], "p": 1.0}
+        ],
+        "p": 0.1
+      }
+    ]
+  },
+  "obb": {
+    "hue_saturation": [
+      {"transform": "HueSaturationValue", "hue_shift_limit": 15, "sat_shift_limit": 20, "val_shift_limit": 15, "p": 1.0}
+    ],
+    "mixed": [
+      {"transform": "RandomBrightnessContrast", "brightness_limit": 0.15, "contrast_limit": 0.15, "p": 0.6},
+      {"transform": "HueSaturationValue", "hue_shift_limit": 10, "sat_shift_limit": 15, "val_shift_limit": 10, "p": 0.4},
+      {"transform": "GaussianBlur", "blur_limit": [3, 3], "p": 0.15}
+    ]
+  }
+}
